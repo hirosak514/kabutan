@@ -76,13 +76,13 @@ def parse_company_list(html: str):
 
     - 日経平均・NYダウ・上海総合・米ドル円などの「指数」行（コードが0始まり）
       は株式銘柄ではないため除外する
-    - コードへのリンクのテキストはコード自体（例: "1325"）であることが多いため、
-      同じ行（<tr>）内にある「コードではない方」のリンクを銘柄名として採用する
+    - 実際のテーブルは1行(<tr>)の中に <td>コード</td><td>銘柄名</td>... という
+      構造になっており、銘柄名側はリンクではなく単なるテキストであることが多い。
+      そのため「1列目=コード, 2列目=銘柄名」という列の位置関係を使って抽出する
+      （方式1）。これがうまくいかない場合のみ、リンクのテキストから推測する
+      従来方式（方式2・3）にフォールバックする。
     """
     soup = BeautifulSoup(html, "lxml")
-    companies = []
-    seen_codes = set()
-
     code_pattern = re.compile(r"code=([0-9][0-9A-Z]{3})")
 
     def is_code_like(text: str) -> bool:
@@ -90,9 +90,57 @@ def parse_company_list(html: str):
         t = text.strip()
         return bool(re.fullmatch(r"[0-9][0-9A-Z]{3}", t))
 
-    # まず行（tr）単位で処理。テーブル構造が取れない場合は後段のフォールバックへ。
-    rows = soup.find_all("tr")
-    for row in rows:
+    # ---- 方式1: 「コードを含むセル」を探し、その次のセルを銘柄名とする ----
+    # 1列目が必ずしもコード列とは限らない（チェックボックス列などがある場合）ため、
+    # 列の位置に依存せず「コードらしき値を含むセル」を基準に判定する。
+    companies = []
+    seen_codes = set()
+    for row in soup.find_all("tr"):
+        cells = row.find_all(["td", "th"])
+        if len(cells) < 2:
+            continue
+
+        code = None
+        code_idx = None
+        for idx, cell in enumerate(cells):
+            a = cell.find("a", href=True)
+            if a:
+                m = code_pattern.search(a["href"])
+                if m:
+                    code = m.group(1)
+                    code_idx = idx
+                    break
+            cell_text = cell.get_text(strip=True)
+            if is_code_like(cell_text):
+                code = cell_text
+                code_idx = idx
+                break
+
+        if code is None or code_idx is None:
+            continue
+        # 日経平均・NYダウ・上海総合・米ドル円などの「指数」はコードが0始まり
+        # → 株式銘柄ではないので除外
+        if code.startswith("0"):
+            continue
+        if code in seen_codes:
+            continue
+        if code_idx + 1 >= len(cells):
+            continue
+
+        name = cells[code_idx + 1].get_text(strip=True)
+        if not name or is_code_like(name):
+            continue
+
+        seen_codes.add(code)
+        companies.append({"code": code, "name": name})
+
+    if companies:
+        return companies
+
+    # ---- 方式2: tr単位でリンクのテキストから推測（方式1が失敗した場合） ----
+    companies = []
+    seen_codes = set()
+    for row in soup.find_all("tr"):
         anchors = row.find_all("a", href=True)
         if not anchors:
             continue
@@ -105,28 +153,15 @@ def parse_company_list(html: str):
             text = a.get_text(strip=True)
             if m and code is None:
                 code = m.group(1)
-                # このリンク自体のテキストが銘柄名を兼ねている場合もある
                 if text and not is_code_like(text):
                     name = text
             elif text and not is_code_like(text) and name is None:
-                # コード以外のリンクで、コードのような文字列でないものを銘柄名候補に
                 name = text
 
-        if not code:
+        if not code or code.startswith("0") or code in seen_codes:
             continue
-
-        # 日経平均・NYダウ・上海総合・米ドル円などの「指数」はコードが0始まり
-        # → 株式銘柄ではないので除外
-        if code.startswith("0"):
-            continue
-
-        if code in seen_codes:
-            continue
-
         if not name:
-            # 銘柄名が取れなかった場合、行全体のテキストから推測（最終手段）
-            row_text = row.get_text(" ", strip=True)
-            name = row_text  # 完全ではないが空よりはまし
+            continue  # 銘柄名が取れない行は除外（行全体テキストは使わない）
 
         seen_codes.add(code)
         companies.append({"code": code, "name": name})
@@ -134,7 +169,7 @@ def parse_company_list(html: str):
     if companies:
         return companies
 
-    # ---- フォールバック: tr単位で取れなかった場合は従来のリンク総当たり方式 ----
+    # ---- 方式3: 最終フォールバック。リンクの総当たり ----
     for a in soup.find_all("a", href=True):
         href = a["href"]
         m = code_pattern.search(href)
