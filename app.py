@@ -49,11 +49,24 @@ if "analysis" not in st.session_state:
     st.session_state.analysis = {}   # code -> dict
 if "charts" not in st.session_state:
     st.session_state.charts = {}     # code -> {day, week, month}
+if "market" not in st.session_state:
+    st.session_state.market = "jp"   # "jp" または "us"
 
 
 # ----------------------------------------------------------------------
 # スクレイピング関連
 # ----------------------------------------------------------------------
+def detect_market(url: str) -> str:
+    """
+    URLのドメインから 'jp'（日本株版 kabutan.jp）か
+    'us'（米国株版 us.kabutan.jp）かを判定する。
+    """
+    host = urlparse(url).netloc.lower()
+    if host.startswith("us."):
+        return "us"
+    return "jp"
+
+
 def build_page_url(base_url: str, page: int) -> str:
     """株探の探検ページのページ番号付きURLを作る"""
     parsed = urlparse(base_url)
@@ -70,25 +83,47 @@ def fetch_html(url: str) -> str:
     return res.text
 
 
-def parse_company_list(html: str):
+def parse_company_list(html: str, market: str = "jp"):
     """
     株探の銘柄探検ページのテーブルから 銘柄コード・銘柄名 を抽出する。
 
-    - 日経平均・NYダウ・上海総合・米ドル円などの「指数」行（コードが0始まり）
-      は株式銘柄ではないため除外する
-    - 実際のテーブルは1行(<tr>)の中に <td>コード</td><td>銘柄名</td>... という
-      構造になっており、銘柄名側はリンクではなく単なるテキストであることが多い。
-      そのため「1列目=コード, 2列目=銘柄名」という列の位置関係を使って抽出する
-      （方式1）。これがうまくいかない場合のみ、リンクのテキストから推測する
-      従来方式（方式2・3）にフォールバックする。
+    market:
+      "jp" -> kabutan.jp（日本株）。コードは数字始まり4桁の英数字、
+              URLは "?code=XXXX" というクエリ形式。指数（日経平均など）は
+              コードが "0" 始まりなので除外する。
+      "us" -> us.kabutan.jp（米国株）。コードはアルファベットのティッカー
+              （例: AAPL, NNBR）で、URLは "/stocks/AAPL/..." という
+              パス形式。
+
+    実際のテーブルは1行(<tr>)の中に <td>コード</td><td>銘柄名</td>... という
+    構造になっており、銘柄名側はリンクではなく単なるテキストであることが多い。
+    そのため「コードを含むセルの次のセル」を銘柄名として抽出する（方式1）。
+    これがうまくいかない場合は、リンクのテキストから推測する従来方式
+    （方式2・3）にフォールバックする。
     """
     soup = BeautifulSoup(html, "lxml")
-    code_pattern = re.compile(r"code=([0-9][0-9A-Z]{3})")
+
+    if market == "us":
+        # 例: href="/stocks/NNBR/chart" や href="/stocks/NNBR" からティッカーを抽出
+        code_pattern = re.compile(r"/stocks/([A-Z][A-Z0-9.\-]{0,5})(?:[/?]|$)")
+        code_text_pattern = re.compile(r"^[A-Z][A-Z0-9.\-]{0,5}$")
+
+        def is_excluded(code: str) -> bool:
+            # 米国株版は指数行が一覧に混ざらない想定だが、念のため
+            # 既知の指数っぽいティッカー（^で始まるなど）は除外
+            return code.startswith("^")
+    else:
+        # 例: href="...?code=1325" や href="...?code=143A" からコードを抽出
+        code_pattern = re.compile(r"code=([0-9][0-9A-Z]{3})")
+        code_text_pattern = re.compile(r"^[0-9][0-9A-Z]{3}$")
+
+        def is_excluded(code: str) -> bool:
+            # 日経平均・NYダウ・上海総合・米ドル円などの「指数」はコードが0始まり
+            # → 株式銘柄ではないので除外
+            return code.startswith("0")
 
     def is_code_like(text: str) -> bool:
-        """テキストが銘柄コードそのもの（数字4桁や英数字4桁）かどうか判定"""
-        t = text.strip()
-        return bool(re.fullmatch(r"[0-9][0-9A-Z]{3}", t))
+        return bool(code_text_pattern.fullmatch(text.strip()))
 
     # ---- 方式1: 「コードを含むセル」を探し、その次のセルを銘柄名とする ----
     # 1列目が必ずしもコード列とは限らない（チェックボックス列などがある場合）ため、
@@ -118,9 +153,7 @@ def parse_company_list(html: str):
 
         if code is None or code_idx is None:
             continue
-        # 日経平均・NYダウ・上海総合・米ドル円などの「指数」はコードが0始まり
-        # → 株式銘柄ではないので除外
-        if code.startswith("0"):
+        if is_excluded(code):
             continue
         if code in seen_codes:
             continue
@@ -128,7 +161,10 @@ def parse_company_list(html: str):
             continue
 
         name = cells[code_idx + 1].get_text(strip=True)
-        if not name or is_code_like(name):
+        # 銘柄名が「コードそのものの繰り返し」である場合のみ無効とする。
+        # （"NN"のようにコードらしい形式と偶然一致する短い社名を
+        #  誤って除外しないよう、is_code_like ではなく完全一致で判定）
+        if not name or name.upper() == code.upper():
             continue
 
         seen_codes.add(code)
@@ -158,7 +194,7 @@ def parse_company_list(html: str):
             elif text and not is_code_like(text) and name is None:
                 name = text
 
-        if not code or code.startswith("0") or code in seen_codes:
+        if not code or is_excluded(code) or code in seen_codes:
             continue
         if not name:
             continue  # 銘柄名が取れない行は除外（行全体テキストは使わない）
@@ -176,7 +212,7 @@ def parse_company_list(html: str):
         if not m:
             continue
         code = m.group(1)
-        if code.startswith("0") or code in seen_codes:
+        if is_excluded(code) or code in seen_codes:
             continue
         name = a.get_text(strip=True)
         if not name:
@@ -189,6 +225,7 @@ def parse_company_list(html: str):
 
 def scrape_company_list(base_url: str, max_pages: int = 2):
     """1ページ目・2ページ目をスクレイピングして銘柄リストを返す"""
+    market = detect_market(base_url)
     all_companies = []
     for page in range(1, max_pages + 1):
         url = base_url if page == 1 else build_page_url(base_url, page)
@@ -197,7 +234,7 @@ def scrape_company_list(base_url: str, max_pages: int = 2):
         except Exception as e:
             st.warning(f"{page}ページ目の取得に失敗しました: {e}")
             continue
-        companies = parse_company_list(html)
+        companies = parse_company_list(html, market=market)
         all_companies.extend(companies)
         time.sleep(1)  # サーバー負荷軽減のためのウェイト
 
@@ -231,17 +268,25 @@ def _setup_japanese_font():
     return None
 
 
-def fetch_kabutan_series(code: str, m: int):
+def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
     """
     株探の内部API (read?c=...&m=...) から株価データ(CSV風テキスト)を取得し、
     [{"date": "20260630", "open":..,"high":..,"low":..,"close":..,"volume":..}, ...]
     のリストを返す。
     m: 1=日足, 2=週足, 3=月足
+    market: "jp"=kabutan.jp（日本株）, "us"=us.kabutan.jp（米国株）
     """
     ts = int(time.time() * 1000)
-    url = f"https://kabutan.jp/stock/read?c={code}&m={m}&k=1&{ts}"
+    if market == "us":
+        # 米国株版: パスが "/stocks/read.php" で、ティッカーはアルファベット
+        url = f"https://us.kabutan.jp/stocks/read.php?c={code}&m={m}&k=1&{ts}"
+        referer = f"https://us.kabutan.jp/stocks/{code}/chart"
+    else:
+        url = f"https://kabutan.jp/stock/read?c={code}&m={m}&k=1&{ts}"
+        referer = f"https://kabutan.jp/stock/chart?code={code}&ashi=1&tech=1_1,2_5"
+
     headers = dict(HEADERS)
-    headers["Referer"] = f"https://kabutan.jp/stock/chart?code={code}&ashi=1&tech=1_1,2_5"
+    headers["Referer"] = referer
 
     res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
     res.raise_for_status()
@@ -330,7 +375,7 @@ def render_candlestick_png(series, title: str, max_bars: int = 150):
     return buf.getvalue()
 
 
-def fetch_chart_images(code: str, name: str):
+def fetch_chart_images(code: str, name: str, market: str = "jp"):
     """
     日足・週足・月足それぞれのチャートPNG（bytes）を辞書で返す。
     """
@@ -340,7 +385,7 @@ def fetch_chart_images(code: str, name: str):
     result = {}
     for key, (m, title) in TF.items():
         try:
-            series = fetch_kabutan_series(code, m)
+            series = fetch_kabutan_series(code, m, market=market)
             png = render_candlestick_png(series, title)
             result[key] = png
         except Exception as e:
@@ -419,13 +464,16 @@ with st.sidebar:
 
 # ---- 更新ボタン処理 ----
 if update_clicked:
-    with st.spinner("株探から銘柄リストを取得中..."):
+    market = detect_market(url_input)
+    st.session_state.market = market
+    market_label = "米国株版 (us.kabutan.jp)" if market == "us" else "日本株版 (kabutan.jp)"
+    with st.spinner(f"株探（{market_label}）から銘柄リストを取得中..."):
         companies = scrape_company_list(url_input, max_pages=2)
     st.session_state.companies = companies
     st.session_state.analysis = {}
     st.session_state.charts = {}
     if companies:
-        st.success(f"{len(companies)}件の銘柄を取得しました。")
+        st.success(f"{market_label}として{len(companies)}件の銘柄を取得しました。")
     else:
         st.error(
             "銘柄を取得できませんでした。サイト構造が想定と異なる可能性が"
@@ -462,7 +510,9 @@ if analyze_clicked:
 
             # チャート取得（未取得の場合のみ実行）
             if code not in st.session_state.charts:
-                st.session_state.charts[code] = fetch_chart_images(code, name)
+                st.session_state.charts[code] = fetch_chart_images(
+                    code, name, market=st.session_state.get("market", "jp")
+                )
 
             progress.progress((i + 1) / total, text=f"分析中... ({i+1}/{total}) {name}")
         progress.empty()
