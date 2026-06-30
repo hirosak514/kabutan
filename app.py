@@ -31,7 +31,8 @@ import google.generativeai as genai
 # ----------------------------------------------------------------------
 st.set_page_config(page_title="株探 銘柄探検 分析アプリ", layout="wide")
 
-DEFAULT_URL = "https://kabutan.jp/tansaku/?mode=2_0870"
+DEFAULT_URL_JP = "https://kabutan.jp/tansaku/?mode=2_0870"
+DEFAULT_URL_US = "https://us.kabutan.jp/tanken/gc_ma5x25"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -447,7 +448,27 @@ st.title("📈 株探 銘柄探検 分析アプリ")
 
 with st.sidebar:
     st.header("設定")
-    url_input = st.text_input("対象URL", value=DEFAULT_URL)
+
+    use_us = st.checkbox(
+        "米国株版（us.kabutan.jp）を使う",
+        value=False,
+        help="チェックを外すと日本株版（kabutan.jp）のURLが使われます。",
+    )
+
+    url_input_jp = st.text_input(
+        "対象URL（日本株版 kabutan.jp）",
+        value=DEFAULT_URL_JP,
+        disabled=use_us,
+    )
+    url_input_us = st.text_input(
+        "対象URL（米国株版 us.kabutan.jp）",
+        value=DEFAULT_URL_US,
+        disabled=not use_us,
+    )
+
+    # チェックボックスの状態に応じて、実際に使うURLを決定
+    url_input = url_input_us if use_us else url_input_jp
+
     gemini_api_key = st.text_input(
         "Gemini APIキー", type="password",
         help="Streamlit Cloudで使う場合は Secrets に GEMINI_API_KEY として"
