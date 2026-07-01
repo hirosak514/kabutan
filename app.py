@@ -606,6 +606,99 @@ def analyze_company_with_claude(client, code: str, name: str) -> dict:
         }
 
 
+
+# ----------------------------------------------------------------------
+# Grok API連携（xAI / OpenAI互換）
+# ----------------------------------------------------------------------
+GROK_ANALYSIS_PROMPT_TEMPLATE = """\
+あなたは株式市場の証券アナリストです。
+今日の日付は {today} です。
+
+【重要】以下の銘柄についてウェブ検索（web_search）で最新情報を調べたうえで、
+次の5項目を具体的な数値付きで、簡潔な日本語でまとめてください。
+
+対象銘柄: {name}（証券コード: {code}）
+
+検索する際は以下を確認してください:
+- 「{code} {name} 決算」「{code} {name} 配当」「{code} {name} 株価」で検索
+- 必ず直近6ヶ月以内の情報を使うこと
+- 決算は「通期」「中間期」「四半期」のいずれか最新のものを使うこと
+- 会社の決算月（3月期・9月期など）を正確に確認すること
+- 配当金は最新の予想または実績を使うこと
+- 株価は本日（{today}）または直近の終値を使うこと
+- ⑤のアナリスト予想目標株価が不明な場合は「みんかぶ（minkabu.jp）の予想株価」を
+  必ず検索して記載してください
+
+出力は必ず以下のJSON形式のみで返してください。前後に説明文やコードブロックの
+記号(```)は付けないでください。
+
+{{
+  "company_overview": "どのような会社か（主要事業・業界での位置づけ・主な顧客層）",
+  "latest_earnings": "直近の決算期名（例:2026年9月期 第2四半期）・発表日・売上高・営業利益・純利益の数値と前年同期比",
+  "valuation": "本日株価（円）・PER（倍）・PBR（倍）・ROE（%）の数値と割安/割高の評価",
+  "dividend_yield": "年間配当金（円）・配当利回り（%）・増減配の状況とその評価",
+  "analyst_target": "アナリスト平均目標株価（円）と現在株価からの乖離率（%）。アナリストカバーがない場合はみんかぶ予想株価（円）と現在株価からの乖離率（%）を記載"
+}}
+"""
+
+
+def init_grok(api_key: str):
+    from openai import OpenAI
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://api.x.ai/v1",
+    )
+
+
+def analyze_company_with_grok(client, code: str, name: str) -> dict:
+    import datetime
+    today = datetime.date.today().strftime("%Y年%m月%d日")
+    prompt = GROK_ANALYSIS_PROMPT_TEMPLATE.format(
+        code=code, name=name, today=today
+    )
+
+    try:
+        # Responses API（web_searchツール付き）で最新情報を取得
+        response = client.responses.create(
+            model="grok-4.3",
+            input=[{"role": "user", "content": prompt}],
+            tools=[{"type": "web_search"}],
+        )
+        text = response.output_text.strip()
+    except Exception:
+        # Responses APIが使えない場合はChat Completions APIにフォールバック
+        try:
+            response = client.chat.completions.create(
+                model="grok-4.3",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2000,
+            )
+            text = response.choices[0].message.content.strip()
+        except Exception as e:
+            return {
+                "company_overview": f"取得失敗: {e}",
+                "latest_earnings": "-",
+                "valuation": "-",
+                "dividend_yield": "-",
+                "analyst_target": "-",
+            }
+
+    try:
+        text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            text = m.group(0)
+        return json.loads(text)
+    except Exception as e:
+        return {
+            "company_overview": text if text else f"解析失敗: {e}",
+            "latest_earnings": "-",
+            "valuation": "-",
+            "dividend_yield": "-",
+            "analyst_target": "-",
+        }
+
+
 # ----------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------
@@ -638,9 +731,9 @@ with st.sidebar:
     st.subheader("🤖 AI分析エンジン")
     api_choice = st.radio(
         "使用するAI",
-        options=["Claude API（推奨）", "Gemini API"],
+        options=["Claude API（推奨）", "Grok API", "Gemini API"],
         index=0,
-        help="ClaudeはWeb検索＋みんかぶ参照で精度が高い。GeminiはGoogle検索グラウンディングを使用。",
+        help="Claude: Web検索＋みんかぶ参照で精度高い。Grok: リアルタイム検索＋X投稿も参照可、無料クレジットあり。Gemini: Googleグラウンディング。",
     )
 
     if api_choice == "Claude API（推奨）":
@@ -651,6 +744,16 @@ with st.sidebar:
         if not claude_api_key:
             claude_api_key = st.secrets.get("CLAUDE_API_KEY", "")
         gemini_api_key = ""
+        grok_api_key = ""
+    elif api_choice == "Grok API":
+        grok_api_key = st.text_input(
+            "Grok APIキー（xAI）", type="password",
+            help="console.x.ai で取得。Streamlit CloudのSecretsに GROK_API_KEY として登録可。データ共有プログラムで最大$175/月の無料クレジットあり。",
+        )
+        if not grok_api_key:
+            grok_api_key = st.secrets.get("GROK_API_KEY", "")
+        claude_api_key = ""
+        gemini_api_key = ""
     else:
         gemini_api_key = st.text_input(
             "Gemini APIキー", type="password",
@@ -659,6 +762,7 @@ with st.sidebar:
         if not gemini_api_key:
             gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")
         claude_api_key = ""
+        grok_api_key = ""
 
     col1, col2 = st.columns(2)
     with col1:
@@ -699,13 +803,17 @@ if analyze_clicked:
         st.warning("先に「更新」ボタンで銘柄リストを取得してください。")
     elif api_choice == "Claude API（推奨）" and not claude_api_key:
         st.warning("Claude APIキーを入力してください。")
+    elif api_choice == "Grok API" and not grok_api_key:
+        st.warning("Grok APIキー（xAI）を入力してください。")
     elif api_choice == "Gemini API" and not gemini_api_key:
         st.warning("Gemini APIキーを入力してください。")
     else:
-        # 選択されたAPIでモデルを初期化
         if api_choice == "Claude API（推奨）":
             ai_client = init_claude(claude_api_key)
             ai_label = "Claude"
+        elif api_choice == "Grok API":
+            ai_client = init_grok(grok_api_key)
+            ai_label = "Grok"
         else:
             ai_client = init_gemini(gemini_api_key)
             ai_label = "Gemini"
@@ -715,10 +823,13 @@ if analyze_clicked:
         for i, company in enumerate(st.session_state.companies):
             code, name = company["code"], company["name"]
 
-            # AI分析（未取得の場合のみ実行）
             if code not in st.session_state.analysis:
                 if api_choice == "Claude API（推奨）":
                     st.session_state.analysis[code] = analyze_company_with_claude(
+                        ai_client, code, name
+                    )
+                elif api_choice == "Grok API":
+                    st.session_state.analysis[code] = analyze_company_with_grok(
                         ai_client, code, name
                     )
                 else:
