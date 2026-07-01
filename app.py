@@ -412,20 +412,31 @@ def fetch_chart_images(code: str, name: str, market: str = "jp"):
 ANALYSIS_PROMPT_TEMPLATE = """\
 あなたは株式市場の証券アナリストです。
 今日の日付は {today} です。
-銘柄コード {code}（{name}）について、必ずGoogleで最新情報を検索したうえで、
-次の5項目を具体的な数値付きで、簡潔な日本語でまとめてください。
-古い情報（1年以上前のデータ）は使わず、できるだけ直近のデータを使ってください。
-不明な項目は「情報不足のため不明」と記載してください。
+
+【重要】以下の銘柄についてGoogleで必ず検索し、最新の正確な情報を取得してください。
+
+対象銘柄: {name}（証券コード: {code}）
+
+検索時の注意点:
+- 「{code} {name} 決算」「{code} {name} 配当」「{code} {name} 株価」などで検索すること
+- 必ず最新（直近6ヶ月以内）の情報を使うこと
+- 決算は「通期」「中間期」「四半期」のいずれか最新のものを使うこと
+- 会社の決算月（3月期・9月期など）を正確に確認すること
+- 配当金は最新の予想または実績を使うこと
+- 株価は本日（{today}）または直近の終値を使うこと
+
+以下の5項目を具体的な数値付きで、簡潔な日本語でまとめてください。
+不明・未確認の項目は「情報不足のため不明」と記載してください。
 
 出力は必ず以下のJSON形式のみで返してください。前後に説明文やコードブロックの
 記号(```)は付けないでください。
 
 {{
-  "company_overview": "どのような会社か（事業内容・業界での位置づけなど）",
-  "latest_earnings": "直近の決算日と決算内容の要約（売上高・営業利益・純利益の数値と前年比も含める）",
-  "valuation": "現在のPER, PBR, ROEの数値とその評価（割安/割高の判断も含める）",
-  "dividend_yield": "現在の配当利回り（%）と年間配当金額、その評価",
-  "analyst_target": "アナリスト予想の目標株価と現在株価、乖離率(%)。アナリストカバーがない場合は理論株価や参考値を記載"
+  "company_overview": "どのような会社か（主要事業・業界での位置づけ・主な顧客層）",
+  "latest_earnings": "直近の決算期名（例:2026年9月期 第2四半期）・発表日・売上高・営業利益・純利益の数値と前年同期比",
+  "valuation": "本日株価（円）・PER（倍）・PBR（倍）・ROE（%）の数値と割安/割高の評価",
+  "dividend_yield": "年間配当金（円）・配当利回り（%）・増減配の状況とその評価",
+  "analyst_target": "アナリスト平均目標株価（円）と現在株価からの乖離率（%）。カバーなしの場合は理論株価の参考値を記載"
 }}
 """
 
@@ -485,6 +496,117 @@ def analyze_company_with_gemini(model, code: str, name: str) -> dict:
 
 
 # ----------------------------------------------------------------------
+# Claude API連携
+# ----------------------------------------------------------------------
+CLAUDE_ANALYSIS_PROMPT_TEMPLATE = """\
+あなたは株式市場の証券アナリストです。
+今日の日付は {today} です。
+
+【重要】以下の銘柄についてウェブ検索で最新情報を調べたうえで、
+次の5項目を具体的な数値付きで、簡潔な日本語でまとめてください。
+
+対象銘柄: {name}（証券コード: {code}）
+
+検索する際は以下を確認してください:
+- 「{code} {name} 決算」「{code} {name} 配当」「{code} {name} 株価」で検索
+- 必ず直近6ヶ月以内の情報を使うこと
+- 決算は「通期」「中間期」「四半期」のいずれか最新のものを使うこと
+- 会社の決算月（3月期・9月期など）を正確に確認すること
+- 配当金は最新の予想または実績を使うこと
+- 株価は本日（{today}）または直近の終値を使うこと
+- ⑤のアナリスト予想目標株価が不明な場合は「みんかぶ（minkabu.jp）の予想株価」を
+  必ず検索して記載してください
+
+出力は必ず以下のJSON形式のみで返してください。前後に説明文やコードブロックの
+記号(```)は付けないでください。
+
+{{
+  "company_overview": "どのような会社か（主要事業・業界での位置づけ・主な顧客層）",
+  "latest_earnings": "直近の決算期名（例:2026年9月期 第2四半期）・発表日・売上高・営業利益・純利益の数値と前年同期比",
+  "valuation": "本日株価（円）・PER（倍）・PBR（倍）・ROE（%）の数値と割安/割高の評価",
+  "dividend_yield": "年間配当金（円）・配当利回り（%）・増減配の状況とその評価",
+  "analyst_target": "アナリスト平均目標株価（円）と現在株価からの乖離率（%）。アナリストカバーがない場合はみんかぶ予想株価（円）と現在株価からの乖離率（%）を記載"
+}}
+"""
+
+
+def init_claude(api_key: str):
+    import anthropic
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def analyze_company_with_claude(client, code: str, name: str) -> dict:
+    import datetime
+    today = datetime.date.today().strftime("%Y年%m月%d日")
+    prompt = CLAUDE_ANALYSIS_PROMPT_TEMPLATE.format(
+        code=code, name=name, today=today
+    )
+
+    messages = [{"role": "user", "content": prompt}]
+    tools = [{"type": "web_search_20250305", "name": "web_search"}]
+
+    try:
+        import anthropic as _anthropic
+        # web_searchツールを使って最新情報を検索しながら分析
+        # stop_reason が "tool_use" の場合はClaudeが内部でツールを使用している
+        # end_turn になるまでループ
+        while True:
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2000,
+                tools=tools,
+                messages=messages,
+            )
+
+            # アシスタントのメッセージをhistoryに追加
+            messages.append({
+                "role": "assistant",
+                "content": response.content,
+            })
+
+            if response.stop_reason == "end_turn":
+                break
+
+            # tool_use ブロックがあれば tool_result を返す（web_searchはサーバー側処理）
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": "",  # web_searchはサーバー側で処理済み
+                    })
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                break  # ツール結果が空の場合は終了
+
+        # 最終的なテキストを抽出
+        text = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                text += block.text
+
+        text = text.strip()
+        text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            text = m.group(0)
+        data = json.loads(text)
+        return data
+
+    except Exception as e:
+        return {
+            "company_overview": f"取得失敗: {e}",
+            "latest_earnings": "-",
+            "valuation": "-",
+            "dividend_yield": "-",
+            "analyst_target": "-",
+        }
+
+
+# ----------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------
 st.title("📈 株探 銘柄探検 分析アプリ")
@@ -512,13 +634,31 @@ with st.sidebar:
     # チェックボックスの状態に応じて、実際に使うURLを決定
     url_input = url_input_us if use_us else url_input_jp
 
-    gemini_api_key = st.text_input(
-        "Gemini APIキー", type="password",
-        help="Streamlit Cloudで使う場合は Secrets に GEMINI_API_KEY として"
-             "登録しておけば、ここは空欄のままでも自動的に使われます。",
+    st.divider()
+    st.subheader("🤖 AI分析エンジン")
+    api_choice = st.radio(
+        "使用するAI",
+        options=["Claude API（推奨）", "Gemini API"],
+        index=0,
+        help="ClaudeはWeb検索＋みんかぶ参照で精度が高い。GeminiはGoogle検索グラウンディングを使用。",
     )
-    if not gemini_api_key:
-        gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")
+
+    if api_choice == "Claude API（推奨）":
+        claude_api_key = st.text_input(
+            "Claude APIキー", type="password",
+            help="Streamlit CloudのSecretsに CLAUDE_API_KEY として登録しておけば自動取得されます。",
+        )
+        if not claude_api_key:
+            claude_api_key = st.secrets.get("CLAUDE_API_KEY", "")
+        gemini_api_key = ""
+    else:
+        gemini_api_key = st.text_input(
+            "Gemini APIキー", type="password",
+            help="Streamlit CloudのSecretsに GEMINI_API_KEY として登録しておけば自動取得されます。",
+        )
+        if not gemini_api_key:
+            gemini_api_key = st.secrets.get("GEMINI_API_KEY", "")
+        claude_api_key = ""
 
     col1, col2 = st.columns(2)
     with col1:
@@ -557,20 +697,34 @@ if st.session_state.companies:
 if analyze_clicked:
     if not st.session_state.companies:
         st.warning("先に「更新」ボタンで銘柄リストを取得してください。")
-    elif not gemini_api_key:
+    elif api_choice == "Claude API（推奨）" and not claude_api_key:
+        st.warning("Claude APIキーを入力してください。")
+    elif api_choice == "Gemini API" and not gemini_api_key:
         st.warning("Gemini APIキーを入力してください。")
     else:
-        model = init_gemini(gemini_api_key)
-        progress = st.progress(0.0, text="分析中...")
+        # 選択されたAPIでモデルを初期化
+        if api_choice == "Claude API（推奨）":
+            ai_client = init_claude(claude_api_key)
+            ai_label = "Claude"
+        else:
+            ai_client = init_gemini(gemini_api_key)
+            ai_label = "Gemini"
+
+        progress = st.progress(0.0, text=f"{ai_label}で分析中...")
         total = len(st.session_state.companies)
         for i, company in enumerate(st.session_state.companies):
             code, name = company["code"], company["name"]
 
-            # Gemini分析（未取得の場合のみ実行）
+            # AI分析（未取得の場合のみ実行）
             if code not in st.session_state.analysis:
-                st.session_state.analysis[code] = analyze_company_with_gemini(
-                    model, code, name
-                )
+                if api_choice == "Claude API（推奨）":
+                    st.session_state.analysis[code] = analyze_company_with_claude(
+                        ai_client, code, name
+                    )
+                else:
+                    st.session_state.analysis[code] = analyze_company_with_gemini(
+                        ai_client, code, name
+                    )
 
             # チャート取得（未取得の場合のみ実行）
             if code not in st.session_state.charts:
@@ -578,7 +732,7 @@ if analyze_clicked:
                     code, name, market=st.session_state.get("market", "jp")
                 )
 
-            progress.progress((i + 1) / total, text=f"分析中... ({i+1}/{total}) {name}")
+            progress.progress((i + 1) / total, text=f"{ai_label}で分析中... ({i+1}/{total}) {name}")
         progress.empty()
         st.success("分析が完了しました。下にスクロールして確認してください。")
 
