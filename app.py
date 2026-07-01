@@ -913,6 +913,16 @@ with st.sidebar:
         claude_api_key = ""
         grok_api_key = ""
 
+    st.divider()
+    analyze_count = st.slider(
+        "分析する会社数",
+        min_value=1,
+        max_value=30,
+        value=30,
+        step=1,
+        help="「更新」で取得した銘柄リストの上から何社を分析するか指定します。",
+    )
+
     col1, col2 = st.columns(2)
     with col1:
         update_clicked = st.button("🔄 更新", use_container_width=True)
@@ -968,8 +978,10 @@ if analyze_clicked:
             ai_label = "Gemini"
 
         progress = st.progress(0.0, text=f"{ai_label}で分析中...")
-        total = len(st.session_state.companies)
-        for i, company in enumerate(st.session_state.companies):
+        # スライダーで指定した社数だけ対象にする（取得件数がそれ以下の場合は全件）
+        target_companies = st.session_state.companies[:analyze_count]
+        total = len(target_companies)
+        for i, company in enumerate(target_companies):
             code, name = company["code"], company["name"]
 
             if code not in st.session_state.analysis:
@@ -1038,6 +1050,7 @@ if st.session_state.analysis:
 
     for company in st.session_state.companies:
         code, name = company["code"], company["name"]
+        # 分析データが存在する会社のみ表示（=分析ボタン時にanalyze_countで絞った結果）
         if code not in st.session_state.analysis:
             continue
 
