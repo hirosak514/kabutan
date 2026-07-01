@@ -410,9 +410,11 @@ def fetch_chart_images(code: str, name: str, market: str = "jp"):
 # Gemini連携
 # ----------------------------------------------------------------------
 ANALYSIS_PROMPT_TEMPLATE = """\
-あなたは日本株の証券アナリストです。
-銘柄コード {code}（{name}）について、最新の公開情報をもとに次の5項目を
-できるだけ具体的な数値付きで、簡潔な日本語でまとめてください。
+あなたは株式市場の証券アナリストです。
+今日の日付は {today} です。
+銘柄コード {code}（{name}）について、必ずGoogleで最新情報を検索したうえで、
+次の5項目を具体的な数値付きで、簡潔な日本語でまとめてください。
+古い情報（1年以上前のデータ）は使わず、できるだけ直近のデータを使ってください。
 不明な項目は「情報不足のため不明」と記載してください。
 
 出力は必ず以下のJSON形式のみで返してください。前後に説明文やコードブロックの
@@ -420,10 +422,10 @@ ANALYSIS_PROMPT_TEMPLATE = """\
 
 {{
   "company_overview": "どのような会社か（事業内容・業界での位置づけなど）",
-  "latest_earnings": "直近の決算日と決算内容の要約",
-  "valuation": "PER, PBR, ROEの水準とその評価（割安/割高など）",
-  "dividend_yield": "配当利回り（%）とその評価",
-  "analyst_target": "アナリスト予想の目標株価と、現在株価からの乖離率(%)"
+  "latest_earnings": "直近の決算日と決算内容の要約（売上高・営業利益・純利益の数値と前年比も含める）",
+  "valuation": "現在のPER, PBR, ROEの数値とその評価（割安/割高の判断も含める）",
+  "dividend_yield": "現在の配当利回り（%）と年間配当金額、その評価",
+  "analyst_target": "アナリスト予想の目標株価と現在株価、乖離率(%)。アナリストカバーがない場合は理論株価や参考値を記載"
 }}
 """
 
@@ -434,17 +436,47 @@ def init_gemini(api_key: str, model_name: str = "gemini-2.5-flash"):
 
 
 def analyze_company_with_gemini(model, code: str, name: str) -> dict:
-    prompt = ANALYSIS_PROMPT_TEMPLATE.format(code=code, name=name)
+    import datetime
+    today = datetime.date.today().strftime("%Y年%m月%d日")
+    prompt = ANALYSIS_PROMPT_TEMPLATE.format(code=code, name=name, today=today)
+
+    # Google検索グラウンディングを有効にして最新情報を取得する
+    # これによりブラウザ版Geminiと同等の最新データが得られる
     try:
-        response = model.generate_content(prompt)
+        search_tool = genai.protos.Tool(
+            google_search=genai.protos.GoogleSearch()
+        )
+        response = model.generate_content(
+            prompt,
+            tools=[search_tool],
+        )
+    except Exception:
+        # グラウンディングが使えない場合（APIプランの制限など）は通常モードで実行
+        try:
+            response = model.generate_content(prompt)
+        except Exception as e:
+            return {
+                "company_overview": f"取得失敗: {e}",
+                "latest_earnings": "-",
+                "valuation": "-",
+                "dividend_yield": "-",
+                "analyst_target": "-",
+            }
+
+    try:
         text = response.text.strip()
         # ```json ... ``` で囲まれて返ってきた場合の除去
         text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
+        # グラウンディング使用時はJSON以外のテキストが混入する場合があるため
+        # { } の範囲だけを抜き出す
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            text = m.group(0)
         data = json.loads(text)
         return data
     except Exception as e:
         return {
-            "company_overview": f"取得失敗: {e}",
+            "company_overview": response.text if hasattr(response, "text") else f"解析失敗: {e}",
             "latest_earnings": "-",
             "valuation": "-",
             "dividend_yield": "-",
