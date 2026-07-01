@@ -294,22 +294,33 @@ def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
     res.encoding = res.apparent_encoding
     text = res.text
 
-    # 日付(8桁数字),始値,高値,安値,終値,出来高,... という形式のレコードを
-    # 正規表現で抜き出す
-    records = re.findall(r"(\d{8},[\d.,]*)", text)
+    # 日付(8桁数字)に続いて始値,高値,安値,終値,出来高,... というレコードを抽出。
+    # 当日分など最新データは日付に時刻が付く場合がある（例: 20260701#10:04）
+    # → #以降を無視して日付8桁だけを取り出す。
+    # カンマの前後にスペースが入る場合もあるため \s* で対応。
+    pat = re.compile(
+        r"(\d{8})(?:#\d{2}:\d{2})?,\s*"   # 日付（時刻オプション）
+        r"([\d.]+),\s*([\d.]+),\s*"        # 始値, 高値
+        r"([\d.]+),\s*([\d.]+),\s*"        # 安値, 終値
+        r"([\d.]+)"                         # 出来高
+    )
     series = []
-    for rec in records:
-        fields = rec.split(",")
-        date = fields[0]
-        # 値が空（休場日や未来日付）のレコードはスキップ
-        if len(fields) < 6 or fields[1] == "":
-            continue
+    for m in pat.finditer(text):
+        date = m.group(1)
         try:
-            o, h, l, c = (float(fields[1]), float(fields[2]),
-                          float(fields[3]), float(fields[4]))
-            v = float(fields[5]) if fields[5] else 0.0
+            o = float(m.group(2))
+            h = float(m.group(3))
+            l = float(m.group(4))
+            c = float(m.group(5))
+            v = float(m.group(6))
         except ValueError:
             continue
+
+        # 株探の内部APIは価格を「0.1円単位（実際の10倍）」で返す。
+        # 例: 実際の株価 2,748円 → API返却値 27480
+        # → すべての価格を 1/10 に補正する。
+        o, h, l, c = o / 10, h / 10, l / 10, c / 10
+
         series.append({"date": date, "open": o, "high": h, "low": l,
                         "close": c, "volume": v})
 
