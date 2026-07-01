@@ -706,6 +706,149 @@ def analyze_company_with_grok(client, code: str, name: str) -> dict:
 
 
 # ----------------------------------------------------------------------
+# PDF生成
+# ----------------------------------------------------------------------
+IPA_FONT_PATH = "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf"
+IPA_FONT_PATH_FALLBACK = "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf"
+
+
+def _get_ipa_font_path() -> str:
+    """利用可能なIPAGothicフォントのパスを返す"""
+    import os
+    for path in [IPA_FONT_PATH, IPA_FONT_PATH_FALLBACK]:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def generate_analysis_pdf(companies, analysis, charts) -> bytes:
+    """
+    分析結果（テキスト5項目 ＋ 日足・週足・月足チャート）を
+    A4縦のPDFにまとめてバイト列で返す。
+    会社ごとにセクションを区切り、縦スクロールと同じ順序で配置。
+    """
+    import io
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Image,
+        HRFlowable, PageBreak,
+    )
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    # --- フォント登録 ---
+    font_path = _get_ipa_font_path()
+    if font_path:
+        try:
+            pdfmetrics.registerFont(TTFont("IPAGothic", font_path))
+            font_name = "IPAGothic"
+        except Exception:
+            font_name = "Helvetica"
+    else:
+        font_name = "Helvetica"
+
+    # --- スタイル定義 ---
+    def style(name, font=font_name, size=10, bold=False, color=colors.black,
+              spaceBefore=4, spaceAfter=4, leading=16):
+        return ParagraphStyle(
+            name,
+            fontName=font,
+            fontSize=size,
+            textColor=color,
+            spaceBefore=spaceBefore,
+            spaceAfter=spaceAfter,
+            leading=leading,
+        )
+
+    s_title    = style("title",    size=16, color=colors.HexColor("#1a237e"),
+                       spaceBefore=10, spaceAfter=6, leading=22)
+    s_label    = style("label",    size=10, color=colors.HexColor("#1565c0"),
+                       spaceBefore=8, spaceAfter=2, leading=14)
+    s_body     = style("body",     size=9,  color=colors.HexColor("#212121"),
+                       spaceBefore=0, spaceAfter=4, leading=14)
+    s_chart    = style("chart",    size=10, color=colors.HexColor("#37474f"),
+                       spaceBefore=10, spaceAfter=2, leading=14)
+    s_header   = style("header",   size=9,  color=colors.HexColor("#546e7a"),
+                       spaceBefore=0, spaceAfter=6, leading=13)
+
+    LABELS = {
+        "company_overview": "① どのような会社か",
+        "latest_earnings":  "② 直近の決算日と決算内容",
+        "valuation":        "③ PER・PBR・ROEの水準と評価",
+        "dividend_yield":   "④ 配当利回り",
+        "analyst_target":   "⑤ アナリスト予想の適正株価と乖離率",
+    }
+    CHART_LABELS = {"day": "日足チャート", "week": "週足チャート", "month": "月足チャート"}
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        rightMargin=15 * mm,
+        leftMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+        title="株探 銘柄探検 分析レポート",
+    )
+
+    import datetime
+    today_str = datetime.date.today().strftime("%Y年%m月%d日")
+
+    story = []
+    story.append(Paragraph("株探 銘柄探検 分析レポート", s_title))
+    story.append(Paragraph(f"作成日: {today_str}　　銘柄数: {len(companies)}社", s_header))
+    story.append(HRFlowable(width="100%", thickness=1.5,
+                             color=colors.HexColor("#1a237e"), spaceAfter=8))
+
+    page_w = A4[0] - 30 * mm  # 利用可能な幅
+
+    for i, company in enumerate(companies):
+        code, name = company["code"], company["name"]
+        if code not in analysis:
+            continue
+
+        # 会社名ヘッダー
+        story.append(Paragraph(f"{name}（{code}）", s_title))
+        story.append(HRFlowable(width="100%", thickness=0.5,
+                                 color=colors.HexColor("#90caf9"), spaceAfter=4))
+
+        # 分析テキスト5項目
+        data = analysis[code]
+        for key, label in LABELS.items():
+            story.append(Paragraph(label, s_label))
+            value = data.get(key, "-") or "-"
+            # 特殊文字（<>&）をエスケープしてParagraphクラッシュを防ぐ
+            value = (value.replace("&", "&amp;")
+                          .replace("<", "&lt;")
+                          .replace(">", "&gt;"))
+            story.append(Paragraph(value, s_body))
+
+        # チャート3種
+        company_charts = charts.get(code, {})
+        for tf_key, tf_label in CHART_LABELS.items():
+            png_bytes = company_charts.get(tf_key)
+            if not png_bytes:
+                continue
+            story.append(Paragraph(tf_label, s_chart))
+            img_buf = io.BytesIO(png_bytes)
+            # アスペクト比を保ちながら幅に合わせてリサイズ
+            img = Image(img_buf, width=page_w, height=page_w * 0.55)
+            story.append(img)
+            story.append(Spacer(1, 4 * mm))
+
+        # 会社間の区切り（最終社は不要）
+        if i < len(companies) - 1:
+            story.append(PageBreak())
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ----------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------
 st.title("📈 株探 銘柄探検 分析アプリ")
@@ -858,7 +1001,31 @@ if analyze_clicked:
 # ----------------------------------------------------------------------
 if st.session_state.analysis:
     st.divider()
-    st.header("分析結果")
+
+    # --- ヘッダーとPDFダウンロードボタンを横並びに配置 ---
+    col_header, col_pdf = st.columns([3, 1])
+    with col_header:
+        st.header("分析結果")
+    with col_pdf:
+        st.write("")  # 垂直位置調整
+        with st.spinner("PDF生成中..."):
+            try:
+                pdf_bytes = generate_analysis_pdf(
+                    st.session_state.companies,
+                    st.session_state.analysis,
+                    st.session_state.charts,
+                )
+                import datetime
+                filename = f"株探分析_{datetime.date.today().strftime('%Y%m%d')}.pdf"
+                st.download_button(
+                    label="📄 PDFをダウンロード",
+                    data=pdf_bytes,
+                    file_name=filename,
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"PDF生成失敗: {e}")
 
     LABELS = {
         "company_overview": "① どのような会社か",
