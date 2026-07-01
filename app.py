@@ -161,11 +161,17 @@ def parse_company_list(html: str, market: str = "jp"):
         if code_idx + 1 >= len(cells):
             continue
 
-        name = cells[code_idx + 1].get_text(strip=True)
-        # 銘柄名が「コードそのものの繰り返し」である場合のみ無効とする。
-        # （"NN"のようにコードらしい形式と偶然一致する短い社名を
-        #  誤って除外しないよう、is_code_like ではなく完全一致で判定）
-        if not name or name.upper() == code.upper():
+        # コードセルの後ろに「アイコンのみの空セル」が挟まる場合があるため、
+        # コードの次セルから順に「空でなく、コードと完全一致しない」最初のセルを
+        # 銘柄名として採用する（例: コード→アイコン→アイコン→銘柄名 という構造に対応）
+        name = ""
+        for next_idx in range(code_idx + 1, len(cells)):
+            candidate = cells[next_idx].get_text(strip=True)
+            if candidate and candidate.upper() != code.upper():
+                name = candidate
+                break
+
+        if not name:
             continue
 
         seen_codes.add(code)
