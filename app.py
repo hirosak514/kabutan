@@ -285,8 +285,9 @@ def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
     """
     ts = int(time.time() * 1000)
     if market == "us":
-        # 米国株版: パスが "/stocks/read.php" で、ティッカーはアルファベット
-        url = f"https://us.kabutan.jp/stocks/read.php?c={code}&m={m}&k=1&{ts}"
+        # 米国株版: ドメインは chart.us.kabutan.jp、パスは /chart/read.php
+        # （実際のNetworkログから確認済み）
+        url = f"https://chart.us.kabutan.jp/chart/read.php?c={code}&m={m}&k=1&{ts}"
         referer = f"https://us.kabutan.jp/stocks/{code}/chart"
     else:
         url = f"https://kabutan.jp/stock/read?c={code}&m={m}&k=1&{ts}"
@@ -322,10 +323,12 @@ def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
         except ValueError:
             continue
 
-        # 株探の内部APIは価格を「0.1円単位（実際の10倍）」で返す。
-        # 例: 実際の株価 2,748円 → API返却値 27480
-        # → すべての価格を 1/10 に補正する。
-        o, h, l, c = o / 10, h / 10, l / 10, c / 10
+        # 日本株版のAPIは価格を「0.1円単位（実際の10倍）」で返すため÷10が必要。
+        # 米国株版のAPIはドル建ての実際の株価をそのまま返すため補正不要。
+        # 例（日本株）: 実際2,748円 → API返却値27480 → ÷10で補正
+        # 例（米国株）: 実際$3.65  → API返却値3.65  → そのまま使用
+        if market != "us":
+            o, h, l, c = o / 10, h / 10, l / 10, c / 10
 
         series.append({"date": date, "open": o, "high": h, "low": l,
                         "close": c, "volume": v})
