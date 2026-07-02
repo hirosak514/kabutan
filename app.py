@@ -34,12 +34,47 @@ st.set_page_config(page_title="株探 銘柄探検 分析アプリ", layout="wid
 DEFAULT_URL_JP = "https://kabutan.jp/tansaku/?mode=2_0870"
 DEFAULT_URL_US = "https://us.kabutan.jp/tanken/gc_ma5x25"
 HEADERS = {
+    # ブラウザに近い完全なヘッダーセットでbot検知を回避する
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 20
+
+# ドメインごとにrequests.Sessionを保持することでクッキーを引き継ぎbot検知を回避する
+_sessions: dict = {}
+
+
+def _get_session(domain: str) -> requests.Session:
+    """ドメインごとのrequests.Sessionを返す（なければ作成してトップページを取得）"""
+    if domain not in _sessions:
+        session = requests.Session()
+        try:
+            # トップページを先に取得してクッキーを確立する
+            session.get(
+                f"https://{domain}/",
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except Exception:
+            pass  # クッキー取得失敗は無視して続行
+        _sessions[domain] = session
+    return _sessions[domain]
+
 
 # ----------------------------------------------------------------------
 # セッション状態の初期化
@@ -78,7 +113,10 @@ def build_page_url(base_url: str, page: int) -> str:
 
 
 def fetch_html(url: str) -> str:
-    res = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    """URLのHTMLをセッション経由で取得する（クッキーを維持してbot検知を回避）"""
+    domain = urlparse(url).netloc
+    session = _get_session(domain)
+    res = session.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     res.raise_for_status()
     res.encoding = res.apparent_encoding
     return res.text
@@ -295,8 +333,13 @@ def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
 
     headers = dict(HEADERS)
     headers["Referer"] = referer
+    headers["Sec-Fetch-Site"] = "same-origin"
+    headers["Sec-Fetch-Dest"] = "empty"
+    headers["X-Requested-With"] = "XMLHttpRequest"
 
-    res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    domain = urlparse(url).netloc
+    session = _get_session(domain)
+    res = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
     res.raise_for_status()
     res.encoding = res.apparent_encoding
     text = res.text
@@ -946,10 +989,49 @@ if update_clicked:
         st.success(f"{market_label}として{len(companies)}件の銘柄を取得しました。")
     else:
         st.error(
-            "銘柄を取得できませんでした。サイト構造が想定と異なる可能性が"
-            "あります。app.py 内の parse_company_list のセレクタを"
-            "確認・調整してください。"
+            "銘柄の自動取得に失敗しました。\n\n"
+            "原因: Streamlit CloudのサーバーIPがkabutan.jpにブロックされている可能性があります（405エラー）。\n\n"
+            "👇 **手動入力モード**で銘柄コードを直接入力して分析できます。"
         )
+
+# 手動入力フォールバック（スクレイピングが失敗した場合に表示）
+if not st.session_state.companies:
+    with st.expander("📝 手動入力モード（スクレイピングが失敗した場合はこちら）", expanded=not st.session_state.companies):
+        market_for_manual = detect_market(url_input)
+        if market_for_manual == "jp":
+            placeholder = "例（日本株）:\n1325,野村ボベスパ\n1383,ベルグアース\n2185,シイエムシイ"
+            help_text = "銘柄コード,銘柄名 の形式で1行1社。銘柄名を省略するとコードをそのまま名前として使います。"
+        else:
+            placeholder = "例（米国株）:\nNNBR,NN Inc.\nFRSH,Freshworks\nLCID,Lucid Group"
+            help_text = "ティッカー,銘柄名 の形式で1行1社。銘柄名を省略するとティッカーをそのまま名前として使います。"
+
+        manual_input = st.text_area(
+            "銘柄コードを入力（1行1社、コンマ区切りで銘柄名も指定可）",
+            height=200,
+            placeholder=placeholder,
+            help=help_text,
+        )
+        if st.button("✅ この銘柄リストで設定", use_container_width=False):
+            companies = []
+            seen = set()
+            for line in manual_input.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [p.strip() for p in line.split(",", 1)]
+                code = parts[0]
+                name = parts[1] if len(parts) > 1 and parts[1] else code
+                if code and code not in seen:
+                    seen.add(code)
+                    companies.append({"code": code, "name": name})
+            if companies:
+                st.session_state.companies = companies
+                st.session_state.market = market_for_manual
+                st.session_state.analysis = {}
+                st.session_state.charts = {}
+                st.success(f"{len(companies)}件の銘柄を手動設定しました。「分析」ボタンを押してください。")
+            else:
+                st.warning("銘柄が入力されていません。")
 
 # 現在の銘柄リストを表示
 if st.session_state.companies:
