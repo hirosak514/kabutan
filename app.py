@@ -34,12 +34,47 @@ st.set_page_config(page_title="株探 銘柄探検 分析アプリ", layout="wid
 DEFAULT_URL_JP = "https://kabutan.jp/tansaku/?mode=2_0870"
 DEFAULT_URL_US = "https://us.kabutan.jp/tanken/gc_ma5x25"
 HEADERS = {
+    # ブラウザに近い完全なヘッダーセットでbot検知を回避する
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 20
+
+# ドメインごとにrequests.Sessionを保持することでクッキーを引き継ぎbot検知を回避する
+_sessions: dict = {}
+
+
+def _get_session(domain: str) -> requests.Session:
+    """ドメインごとのrequests.Sessionを返す（なければ作成してトップページを取得）"""
+    if domain not in _sessions:
+        session = requests.Session()
+        try:
+            # トップページを先に取得してクッキーを確立する
+            session.get(
+                f"https://{domain}/",
+                headers=HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except Exception:
+            pass  # クッキー取得失敗は無視して続行
+        _sessions[domain] = session
+    return _sessions[domain]
+
 
 # ----------------------------------------------------------------------
 # セッション状態の初期化
@@ -78,7 +113,10 @@ def build_page_url(base_url: str, page: int) -> str:
 
 
 def fetch_html(url: str) -> str:
-    res = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    """URLのHTMLをセッション経由で取得する（クッキーを維持してbot検知を回避）"""
+    domain = urlparse(url).netloc
+    session = _get_session(domain)
+    res = session.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     res.raise_for_status()
     res.encoding = res.apparent_encoding
     return res.text
@@ -295,8 +333,13 @@ def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
 
     headers = dict(HEADERS)
     headers["Referer"] = referer
+    headers["Sec-Fetch-Site"] = "same-origin"
+    headers["Sec-Fetch-Dest"] = "empty"
+    headers["X-Requested-With"] = "XMLHttpRequest"
 
-    res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    domain = urlparse(url).netloc
+    session = _get_session(domain)
+    res = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
     res.raise_for_status()
     res.encoding = res.apparent_encoding
     text = res.text
