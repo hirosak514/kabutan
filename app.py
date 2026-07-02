@@ -439,22 +439,70 @@ def render_candlestick_png(series, title: str, max_bars: int = 150):
     return buf.getvalue()
 
 
+def fetch_series_from_yfinance(code: str, market: str, tf_key: str) -> list:
+    """
+    Yahoo Finance から株価データ（OHLCV）を取得して
+    [{"date":..,"open":..,"high":..,"low":..,"close":..,"volume":..}, ...]
+    形式のリストを返す。
+    市場: "jp" → コード.T (東証)、"us" → ティッカーそのまま
+    tf_key: "day"=日足(6ヶ月) / "week"=週足(2年) / "month"=月足(5年)
+    """
+    import yfinance as yf
+
+    ticker_symbol = f"{code}.T" if market == "jp" else code
+    period_map  = {"day": "6mo",  "week": "2y",  "month": "5y"}
+    interval_map = {"day": "1d",  "week": "1wk", "month": "1mo"}
+
+    hist = yf.Ticker(ticker_symbol).history(
+        period=period_map[tf_key],
+        interval=interval_map[tf_key],
+    )
+    if hist.empty:
+        return []
+
+    series = []
+    for ts, row in hist.iterrows():
+        series.append({
+            "date": ts.strftime("%Y%m%d"),
+            "open":   float(row["Open"]),
+            "high":   float(row["High"]),
+            "low":    float(row["Low"]),
+            "close":  float(row["Close"]),
+            "volume": float(row["Volume"]),
+        })
+    return series
+
+
 def fetch_chart_images(code: str, name: str, market: str = "jp"):
     """
     日足・週足・月足それぞれのチャートPNG（bytes）を辞書で返す。
+    1. Yahoo Finance (yfinance) でデータ取得を試みる
+    2. 失敗した場合のみ 株探チャートAPI (kabutan.jp) にフォールバック
     """
-    TF = {"day": (1, f"{name}（{code}） 日足"),
-          "week": (2, f"{name}（{code}） 週足"),
-          "month": (3, f"{name}（{code}） 月足")}
+    TF = {
+        "day":   (1, f"{name}（{code}） 日足"),
+        "week":  (2, f"{name}（{code}） 週足"),
+        "month": (3, f"{name}（{code}） 月足"),
+    }
     result = {}
-    for key, (m, title) in TF.items():
+    for key, (m_num, title) in TF.items():
+        series = None
+
+        # --- 1. Yahoo Finance で取得 ---
         try:
-            series = fetch_kabutan_series(code, m, market=market)
-            png = render_candlestick_png(series, title)
-            result[key] = png
-        except Exception as e:
-            result[key] = None
-        time.sleep(0.3)
+            series = fetch_series_from_yfinance(code, market, key)
+        except Exception:
+            series = None
+
+        # --- 2. フォールバック: 株探チャートAPI ---
+        if not series:
+            try:
+                series = fetch_kabutan_series(code, m_num, market=market)
+            except Exception:
+                series = None
+
+        result[key] = render_candlestick_png(series, title) if series else None
+        time.sleep(0.2)
     return result
 
 
