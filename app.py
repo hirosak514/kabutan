@@ -999,10 +999,22 @@ if not st.session_state.companies:
     with st.expander("📝 手動入力モード（スクレイピングが失敗した場合はこちら）", expanded=not st.session_state.companies):
         market_for_manual = detect_market(url_input)
         if market_for_manual == "jp":
-            placeholder = "例（日本株）:\n1325,野村ボベスパ\n1383,ベルグアース\n2185,シイエムシイ"
-            help_text = "銘柄コード,銘柄名 の形式で1行1社。銘柄名を省略するとコードをそのまま名前として使います。"
+            placeholder = (
+                "かぶたんの銘柄一覧表をそのままコピー&ペーストしてください。\n"
+                "例:\n"
+                "1417\tミライトワン\t東Ｐ\t\n"
+                "3,873\t\t+51\t+1.33%\t...\n"
+                "1419\tタマホーム\t東Ｐ\t\n"
+                "2,950\t\t+47\t+1.62%\t...\n\n"
+                "または手入力形式: コード,銘柄名 （1行1社）\n"
+                "例: 1325,野村ボベスパ"
+            )
+            help_text = "かぶたんの表をCtrl+Aで全選択してコピーしたものをそのまま貼り付けられます。コードと銘柄名の行だけ自動抽出します。"
         else:
-            placeholder = "例（米国株）:\nNNBR,NN Inc.\nFRSH,Freshworks\nLCID,Lucid Group"
+            placeholder = (
+                "ティッカー,銘柄名 の形式で1行1社。\n"
+                "例:\nNNBR,NN Inc.\nFRSH,Freshworks\nLCID,Lucid Group"
+            )
             help_text = "ティッカー,銘柄名 の形式で1行1社。銘柄名を省略するとティッカーをそのまま名前として使います。"
 
         manual_input = st.text_area(
@@ -1014,13 +1026,37 @@ if not st.session_state.companies:
         if st.button("✅ この銘柄リストで設定", use_container_width=False):
             companies = []
             seen = set()
+            # かぶたんからコピーした形式（タブ区切り）と
+            # 従来の手入力形式（コンマ区切り）の両方に対応する
+            # かぶたんコピー形式:
+            #   コード\t銘柄名\t市場\t  ← この行を使う
+            #   株価\t\t前日比\t...     ← この行はスキップ
+            # 手入力形式:
+            #   1325,野村ボベスパ
+            jp_code_pat = re.compile(r"^[0-9][0-9A-Z]{3}$")
+            us_code_pat = re.compile(r"^[A-Z][A-Z0-9.\-]{0,5}$")
+
             for line in manual_input.strip().splitlines():
                 line = line.strip()
                 if not line:
                     continue
-                parts = [p.strip() for p in line.split(",", 1)]
-                code = parts[0]
-                name = parts[1] if len(parts) > 1 and parts[1] else code
+
+                # タブが含まれている → かぶたんコピー形式として解析
+                if "\t" in line:
+                    parts = [p.strip() for p in line.split("\t")]
+                    code = parts[0] if parts else ""
+                    name = parts[1] if len(parts) > 1 else ""
+                    # コードらしくない行（株価行など）はスキップ
+                    if not (jp_code_pat.fullmatch(code) or us_code_pat.fullmatch(code)):
+                        continue
+                    if not name:
+                        name = code
+                else:
+                    # カンマ区切りの手入力形式
+                    parts = [p.strip() for p in line.split(",", 1)]
+                    code = parts[0]
+                    name = parts[1] if len(parts) > 1 and parts[1] else code
+
                 if code and code not in seen:
                     seen.add(code)
                     companies.append({"code": code, "name": name})
