@@ -85,6 +85,8 @@ if "analysis" not in st.session_state:
     st.session_state.analysis = {}   # code -> dict
 if "charts" not in st.session_state:
     st.session_state.charts = {}     # code -> {day, week, month}
+if "daily_series" not in st.session_state:
+    st.session_state.daily_series = {}  # code -> [{date, open, high, low, close, volume}, ...]
 if "market" not in st.session_state:
     st.session_state.market = "jp"   # "jp" または "us"
 
@@ -476,6 +478,10 @@ def fetch_series_from_yfinance(code: str, market: str, tf_key: str) -> list:
 def fetch_chart_images(code: str, name: str, market: str = "jp"):
     """
     日足・週足・月足それぞれのチャートPNG（bytes）を辞書で返す。
+    また日足の生データ（OHLCVリスト）も合わせて返す。
+    戻り値: (charts_dict, daily_series)
+      charts_dict: {"day": png_bytes, "week": png_bytes, "month": png_bytes}
+      daily_series: [{"date","open","high","low","close","volume"}, ...]
     1. Yahoo Finance (yfinance) でデータ取得を試みる
     2. 失敗した場合のみ 株探チャートAPI (kabutan.jp) にフォールバック
     """
@@ -485,6 +491,8 @@ def fetch_chart_images(code: str, name: str, market: str = "jp"):
         "month": (3, f"{name}（{code}） 月足"),
     }
     result = {}
+    daily_series = []
+
     for key, (m_num, title) in TF.items():
         series = None
 
@@ -502,8 +510,13 @@ def fetch_chart_images(code: str, name: str, market: str = "jp"):
                 series = None
 
         result[key] = render_candlestick_png(series, title) if series else None
+
+        # 日足データは直近出来高テーブル用に保存
+        if key == "day" and series:
+            daily_series = series
+
         time.sleep(0.2)
-    return result
+    return result, daily_series
 
 
 # ----------------------------------------------------------------------
@@ -815,9 +828,9 @@ def _get_ipa_font_path() -> str:
     return None
 
 
-def generate_analysis_pdf(companies, analysis, charts) -> bytes:
+def generate_analysis_pdf(companies, analysis, charts, daily_series=None) -> bytes:
     """
-    分析結果（テキスト5項目 ＋ 日足・週足・月足チャート）を
+    分析結果（直近7営業日テーブル＋テキスト5項目＋日足・週足・月足チャート）を
     A4縦のPDFにまとめてバイト列で返す。
     会社ごとにセクションを区切り、縦スクロールと同じ順序で配置。
     """
@@ -827,7 +840,7 @@ def generate_analysis_pdf(companies, analysis, charts) -> bytes:
     from reportlab.lib.units import mm
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Image,
-        HRFlowable, PageBreak,
+        HRFlowable, PageBreak, Table, TableStyle,
     )
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.pdfbase import pdfmetrics
@@ -901,7 +914,7 @@ def generate_analysis_pdf(companies, analysis, charts) -> bytes:
 
     for i, company in enumerate(companies):
         code, name = company["code"], company["name"]
-        if code not in analysis:
+        if code not in analysis and code not in (charts or {}):
             continue
 
         # 会社名ヘッダー
@@ -909,16 +922,53 @@ def generate_analysis_pdf(companies, analysis, charts) -> bytes:
         story.append(HRFlowable(width="100%", thickness=0.5,
                                  color=colors.HexColor("#90caf9"), spaceAfter=4))
 
+        # 直近7営業日の株価・出来高テーブル
+        ds = (daily_series or {}).get(code, [])
+        if ds:
+            recent7 = ds[-7:][::-1]
+            # ヘッダー行
+            is_jp = len(recent7) > 0 and recent7[0]["close"] > 10
+            price_label = "終値（円）" if is_jp else "終値（$）"
+            table_data = [["日付", price_label, "出来高（株）"]]
+            for d in recent7:
+                date_str = f"{d['date'][:4]}/{d['date'][4:6]}/{d['date'][6:]}"
+                close = d["close"]
+                volume = int(d["volume"])
+                price_str = f"{close:,.0f}" if is_jp else f"{close:.2f}"
+                table_data.append([date_str, price_str, f"{volume:,}"])
+
+            tbl = Table(
+                table_data,
+                colWidths=[35*mm, 40*mm, 55*mm],
+                hAlign="LEFT",
+            )
+            tbl.setStyle(TableStyle([
+                ("BACKGROUND",  (0, 0), (-1, 0),  colors.HexColor("#1565c0")),
+                ("TEXTCOLOR",   (0, 0), (-1, 0),  colors.white),
+                ("FONTNAME",    (0, 0), (-1, -1), font_name),
+                ("FONTSIZE",    (0, 0), (-1, -1), 9),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+                 [colors.HexColor("#f5f5f5"), colors.white]),
+                ("ALIGN",       (1, 0), (-1, -1), "RIGHT"),
+                ("ALIGN",       (0, 0), (0, -1),  "LEFT"),
+                ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#bdbdbd")),
+                ("TOPPADDING",  (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            story.append(tbl)
+            story.append(Spacer(1, 4*mm))
+
         # 分析テキスト5項目
-        data = analysis[code]
-        for key, label in LABELS.items():
-            story.append(Paragraph(label, s_label))
-            value = data.get(key, "-") or "-"
-            # 特殊文字（<>&）をエスケープしてParagraphクラッシュを防ぐ
-            value = (value.replace("&", "&amp;")
-                          .replace("<", "&lt;")
-                          .replace(">", "&gt;"))
-            story.append(Paragraph(value, s_body))
+        if code in analysis:
+            data = analysis[code]
+            for key, label in LABELS.items():
+                story.append(Paragraph(label, s_label))
+                value = data.get(key, "-") or "-"
+                # 特殊文字（<>&）をエスケープしてParagraphクラッシュを防ぐ
+                value = (value.replace("&", "&amp;")
+                              .replace("<", "&lt;")
+                              .replace(">", "&gt;"))
+                story.append(Paragraph(value, s_body))
 
         # チャート3種
         company_charts = charts.get(code, {})
@@ -1036,6 +1086,7 @@ if update_clicked:
     st.session_state.companies = companies
     st.session_state.analysis = {}
     st.session_state.charts = {}
+    st.session_state.daily_series = {}
     if companies:
         st.success(f"{market_label}として{len(companies)}件の銘柄を取得しました。")
     else:
@@ -1172,9 +1223,11 @@ if analyze_clicked:
 
             # チャート取得（未取得の場合のみ実行）
             if code not in st.session_state.charts:
-                st.session_state.charts[code] = fetch_chart_images(
+                charts, daily = fetch_chart_images(
                     code, name, market=st.session_state.get("market", "jp")
                 )
+                st.session_state.charts[code] = charts
+                st.session_state.daily_series[code] = daily
 
             progress.progress((i + 1) / total, text=f"{ai_label}で分析中... ({i+1}/{total}) {name}")
         progress.empty()
@@ -1191,9 +1244,11 @@ if chart_only_clicked:
         for i, company in enumerate(target_companies):
             code, name = company["code"], company["name"]
             if code not in st.session_state.charts:
-                st.session_state.charts[code] = fetch_chart_images(
+                charts, daily = fetch_chart_images(
                     code, name, market=st.session_state.get("market", "jp")
                 )
+                st.session_state.charts[code] = charts
+                st.session_state.daily_series[code] = daily
             progress.progress(
                 (i + 1) / total,
                 text=f"チャート取得中... ({i+1}/{total}) {name}"
@@ -1231,6 +1286,7 @@ if has_analysis or has_charts:
                     display_companies,
                     st.session_state.analysis,
                     st.session_state.charts,
+                    daily_series=st.session_state.daily_series,
                 )
                 import datetime
                 suffix = "分析" if has_analysis else "グラフ"
@@ -1256,8 +1312,35 @@ if has_analysis or has_charts:
 
     for company in display_companies:
         code, name = company["code"], company["name"]
+        market = st.session_state.get("market", "jp")
 
         st.subheader(f"{name}（{code}）")
+
+        # ── 直近7営業日の株価・出来高テーブル（赤枠部分）──
+        daily = st.session_state.daily_series.get(code, [])
+        if daily:
+            recent7 = daily[-7:][::-1]  # 直近7件を新しい順に
+            is_jp = (market == "jp")
+            rows = []
+            for d in recent7:
+                date_str = f"{d['date'][:4]}/{d['date'][4:6]}/{d['date'][6:]}"
+                close = d["close"]
+                volume = int(d["volume"])
+                if is_jp:
+                    rows.append({
+                        "日付": date_str,
+                        "終値（円）": f"{close:,.0f}",
+                        "出来高（株）": f"{volume:,}",
+                    })
+                else:
+                    rows.append({
+                        "日付": date_str,
+                        "終値（$）": f"{close:.2f}",
+                        "出来高（株）": f"{volume:,}",
+                    })
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("直近出来高データを取得できませんでした。")
 
         # AI分析テキスト（「分析」実行済みの場合のみ表示）
         if code in st.session_state.analysis:
