@@ -1017,11 +1017,14 @@ with st.sidebar:
         help="「更新」で取得した銘柄リストの上から何社を分析するか指定します。",
     )
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         update_clicked = st.button("🔄 更新", use_container_width=True)
     with col2:
         analyze_clicked = st.button("🔍 分析", use_container_width=True)
+    with col3:
+        chart_only_clicked = st.button("📊 グラフのみ", use_container_width=True,
+                                       help="APIキー不要。チャートデータの取得と描画のみ行います。")
 
 # ---- 更新ボタン処理 ----
 if update_clicked:
@@ -1177,27 +1180,61 @@ if analyze_clicked:
         progress.empty()
         st.success("分析が完了しました。下にスクロールして確認してください。")
 
+# ---- グラフのみボタン処理 ----
+if chart_only_clicked:
+    if not st.session_state.companies:
+        st.warning("先に「更新」ボタンまたは手動入力で銘柄リストを取得してください。")
+    else:
+        target_companies = st.session_state.companies[:analyze_count]
+        total = len(target_companies)
+        progress = st.progress(0.0, text="チャートデータを取得中...")
+        for i, company in enumerate(target_companies):
+            code, name = company["code"], company["name"]
+            if code not in st.session_state.charts:
+                st.session_state.charts[code] = fetch_chart_images(
+                    code, name, market=st.session_state.get("market", "jp")
+                )
+            progress.progress(
+                (i + 1) / total,
+                text=f"チャート取得中... ({i+1}/{total}) {name}"
+            )
+        progress.empty()
+        st.success("チャートの取得が完了しました。下にスクロールして確認してください。")
+
 # ----------------------------------------------------------------------
 # 結果表示（縦スクロールで全銘柄）
+# 「分析」実行済み or「グラフのみ」実行済みの場合に表示
 # ----------------------------------------------------------------------
-if st.session_state.analysis:
+has_analysis = bool(st.session_state.analysis)
+has_charts   = bool(st.session_state.charts)
+
+if has_analysis or has_charts:
     st.divider()
+
+    # 表示する会社リスト（分析またはチャートがある会社）
+    display_companies = [
+        c for c in st.session_state.companies
+        if c["code"] in st.session_state.analysis
+        or c["code"] in st.session_state.charts
+    ]
 
     # --- ヘッダーとPDFダウンロードボタンを横並びに配置 ---
     col_header, col_pdf = st.columns([3, 1])
     with col_header:
-        st.header("分析結果")
+        mode_label = "分析結果" if has_analysis else "グラフ一覧"
+        st.header(mode_label)
     with col_pdf:
         st.write("")  # 垂直位置調整
         with st.spinner("PDF生成中..."):
             try:
                 pdf_bytes = generate_analysis_pdf(
-                    st.session_state.companies,
+                    display_companies,
                     st.session_state.analysis,
                     st.session_state.charts,
                 )
                 import datetime
-                filename = f"株探分析_{datetime.date.today().strftime('%Y%m%d')}.pdf"
+                suffix = "分析" if has_analysis else "グラフ"
+                filename = f"株探{suffix}_{datetime.date.today().strftime('%Y%m%d')}.pdf"
                 st.download_button(
                     label="📄 PDFをダウンロード",
                     data=pdf_bytes,
@@ -1210,26 +1247,26 @@ if st.session_state.analysis:
 
     LABELS = {
         "company_overview": "① どのような会社か",
-        "latest_earnings": "② 直近の決算日と決算内容",
-        "valuation": "③ PER・PBR・ROEの水準と評価",
-        "dividend_yield": "④ 配当利回り",
-        "analyst_target": "⑤ アナリスト予想の適正株価と乖離率",
+        "latest_earnings":  "② 直近の決算日と決算内容",
+        "valuation":        "③ PER・PBR・ROEの水準と評価",
+        "dividend_yield":   "④ 配当利回り",
+        "analyst_target":   "⑤ アナリスト予想の適正株価と乖離率",
     }
     CHART_LABELS = {"day": "日足", "week": "週足", "month": "月足"}
 
-    for company in st.session_state.companies:
+    for company in display_companies:
         code, name = company["code"], company["name"]
-        # 分析データが存在する会社のみ表示（=分析ボタン時にanalyze_countで絞った結果）
-        if code not in st.session_state.analysis:
-            continue
 
         st.subheader(f"{name}（{code}）")
 
-        data = st.session_state.analysis[code]
-        for key, label in LABELS.items():
-            st.markdown(f"**{label}**")
-            st.write(data.get(key, "-"))
+        # AI分析テキスト（「分析」実行済みの場合のみ表示）
+        if code in st.session_state.analysis:
+            data = st.session_state.analysis[code]
+            for key, label in LABELS.items():
+                st.markdown(f"**{label}**")
+                st.write(data.get(key, "-"))
 
+        # チャート（「分析」「グラフのみ」どちらでも表示）
         charts = st.session_state.charts.get(code, {})
         for tf_key, tf_label in CHART_LABELS.items():
             st.markdown(f"**{tf_label}チャート**")
@@ -1237,9 +1274,6 @@ if st.session_state.analysis:
             if png_bytes:
                 st.image(png_bytes, use_container_width=True)
             else:
-                st.info(
-                    f"{tf_label}チャートの取得に失敗しました。"
-                    "fetch_kabutan_series 関数のAPI仕様を確認してください。"
-                )
+                st.info(f"{tf_label}チャートのデータを取得できませんでした。")
 
         st.divider()
