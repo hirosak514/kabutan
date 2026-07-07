@@ -87,6 +87,8 @@ if "charts" not in st.session_state:
     st.session_state.charts = {}     # code -> {day, week, month}
 if "daily_series" not in st.session_state:
     st.session_state.daily_series = {}  # code -> [{date, open, high, low, close, volume}, ...]
+if "selected_codes" not in st.session_state:
+    st.session_state.selected_codes = set()  # チェックされた銘柄コードのセット
 if "market" not in st.session_state:
     st.session_state.market = "jp"   # "jp" または "us"
 
@@ -1087,6 +1089,9 @@ if update_clicked:
     st.session_state.analysis = {}
     st.session_state.charts = {}
     st.session_state.daily_series = {}
+    st.session_state.selected_codes = set()
+    if "company_editor" in st.session_state:
+        del st.session_state["company_editor"]
     if companies:
         st.success(f"{market_label}として{len(companies)}件の銘柄を取得しました。")
     else:
@@ -1171,13 +1176,56 @@ if not st.session_state.companies:
             else:
                 st.warning("銘柄が入力されていません。")
 
-# 現在の銘柄リストを表示
+# 現在の銘柄リストをチェックボックス付きで表示
 if st.session_state.companies:
     st.subheader("取得した銘柄リスト")
-    st.dataframe(
-        [{"コード": c["code"], "銘柄名": c["name"]} for c in st.session_state.companies],
+
+    # チェックボックス付きテーブル（data_editor）
+    # スライダーで指定した件数のみ表示対象とする
+    visible = st.session_state.companies[:analyze_count]
+    df_rows = [
+        {"選択": True, "コード": c["code"], "銘柄名": c["name"]}
+        for c in visible
+    ]
+    col_all, col_none, _ = st.columns([1, 1, 6])
+    with col_all:
+        if st.button("✅ 全選択", use_container_width=True):
+            # セッションキーを削除してリセット（次レンダリングで全チェック）
+            if "company_editor" in st.session_state:
+                del st.session_state["company_editor"]
+            st.rerun()
+    with col_none:
+        if st.button("☐ 全解除", use_container_width=True):
+            # 全解除状態を強制セット
+            st.session_state["company_editor"] = {
+                "edited_rows": {i: {"選択": False} for i in range(len(df_rows))},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+            st.rerun()
+
+    edited = st.data_editor(
+        df_rows,
+        column_config={
+            "選択": st.column_config.CheckboxColumn(
+                "選択", default=True,
+                help="チェックを入れた銘柄のみ「分析」「グラフのみ」の対象となります"
+            ),
+            "コード": st.column_config.TextColumn("コード", disabled=True),
+            "銘柄名": st.column_config.TextColumn("銘柄名", disabled=True),
+        },
+        disabled=["コード", "銘柄名"],
+        hide_index=True,
         use_container_width=True,
+        key="company_editor",
     )
+
+    # チェック済みコードをセッションに保存（ボタン処理で参照）
+    st.session_state.selected_codes = {
+        row["コード"] for row in edited if row["選択"]
+    }
+    checked_count = len(st.session_state.selected_codes)
+    st.caption(f"{checked_count} / {len(visible)} 社が選択されています")
 
 # ---- 分析ボタン処理 ----
 if analyze_clicked:
@@ -1201,8 +1249,15 @@ if analyze_clicked:
             ai_label = "Gemini"
 
         progress = st.progress(0.0, text=f"{ai_label}で分析中...")
-        # スライダーで指定した社数だけ対象にする（取得件数がそれ以下の場合は全件）
-        target_companies = st.session_state.companies[:analyze_count]
+        # チェック済みの銘柄のみ対象（スライダーで表示された中からチェックされたもの）
+        selected = st.session_state.get(
+            "selected_codes",
+            {c["code"] for c in st.session_state.companies[:analyze_count]}
+        )
+        target_companies = [
+            c for c in st.session_state.companies[:analyze_count]
+            if c["code"] in selected
+        ]
         total = len(target_companies)
         for i, company in enumerate(target_companies):
             code, name = company["code"], company["name"]
@@ -1238,7 +1293,14 @@ if chart_only_clicked:
     if not st.session_state.companies:
         st.warning("先に「更新」ボタンまたは手動入力で銘柄リストを取得してください。")
     else:
-        target_companies = st.session_state.companies[:analyze_count]
+        selected = st.session_state.get(
+            "selected_codes",
+            {c["code"] for c in st.session_state.companies[:analyze_count]}
+        )
+        target_companies = [
+            c for c in st.session_state.companies[:analyze_count]
+            if c["code"] in selected
+        ]
         total = len(target_companies)
         progress = st.progress(0.0, text="チャートデータを取得中...")
         for i, company in enumerate(target_companies):
