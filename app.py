@@ -932,11 +932,25 @@ def generate_analysis_pdf(companies, analysis, charts, daily_series=None) -> byt
             is_jp = len(recent7) > 0 and recent7[0]["close"] > 10
             price_label = "終値（円）" if is_jp else "終値（$）"
             table_data = [["日付", price_label, "出来高（株）"]]
-            for d in recent7:
+
+            # 騰落率（最新終値 vs 7営業日前終値）
+            latest_close = recent7[0]["close"]
+            oldest_close = recent7[-1]["close"]
+            if oldest_close and oldest_close != 0:
+                change_pct = (latest_close - oldest_close) / oldest_close * 100
+                arrow = "▲" if change_pct >= 0 else "▼"
+                change_str = f" {arrow}{abs(change_pct):.2f}%"
+            else:
+                change_str = ""
+
+            for idx, d in enumerate(recent7):
                 date_str = f"{d['date'][:4]}/{d['date'][4:6]}/{d['date'][6:]}"
                 close = d["close"]
                 volume = int(d["volume"])
                 price_str = f"{close:,.0f}" if is_jp else f"{close:.2f}"
+                # 最新行のみ騰落率を追記
+                if idx == 0:
+                    price_str += change_str
                 table_data.append([date_str, price_str, f"{volume:,}"])
 
             tbl = Table(
@@ -1383,21 +1397,36 @@ if has_analysis or has_charts:
         if daily:
             recent7 = daily[-7:][::-1]  # 直近7件を新しい順に
             is_jp = (market == "jp")
+
+            # 騰落率を計算（最新終値 vs 7営業日前の終値）
+            latest_close = recent7[0]["close"]
+            oldest_close = recent7[-1]["close"]
+            if oldest_close and oldest_close != 0:
+                change_pct = (latest_close - oldest_close) / oldest_close * 100
+                arrow = "▲" if change_pct >= 0 else "▼"
+                change_str = f"{arrow}{abs(change_pct):.2f}%"
+            else:
+                change_str = ""
+
             rows = []
-            for d in recent7:
+            for idx, d in enumerate(recent7):
                 date_str = f"{d['date'][:4]}/{d['date'][4:6]}/{d['date'][6:]}"
                 close = d["close"]
                 volume = int(d["volume"])
+
+                # 最新行（1行目）のみ終値の右に騰落率を表示
                 if is_jp:
+                    close_disp = f"{close:,.0f}  {change_str}" if idx == 0 else f"{close:,.0f}"
                     rows.append({
                         "日付": date_str,
-                        "終値（円）": f"{close:,.0f}",
+                        "終値（円）": close_disp,
                         "出来高（株）": f"{volume:,}",
                     })
                 else:
+                    close_disp = f"{close:.2f}  {change_str}" if idx == 0 else f"{close:.2f}"
                     rows.append({
                         "日付": date_str,
-                        "終値（$）": f"{close:.2f}",
+                        "終値（$）": close_disp,
                         "出来高（株）": f"{volume:,}",
                     })
             st.dataframe(rows, use_container_width=True, hide_index=True)
