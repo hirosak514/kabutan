@@ -1728,6 +1728,51 @@ if has_analysis or has_charts:
 
         st.subheader(f"{name}（{code}）")
 
+        # ── 急騰モード時：メトリクス（急騰率・ランキング順位）を表示 ──
+        surge_ranking = st.session_state.get("surge_ranking", [])
+        top20_codes   = st.session_state.get("surge_top20_codes", set())
+        is_surge_mode = bool(top20_codes) and code in top20_codes
+
+        surge_ratio = 0.0
+        surge_rank  = None
+        if is_surge_mode and surge_ranking:
+            for rank_idx, item in enumerate(surge_ranking, 1):
+                if item["company"]["code"] == code:
+                    surge_ratio = item["ratio"]
+                    surge_rank  = rank_idx
+                    break
+
+        if is_surge_mode and surge_ratio > 0:
+            mc1, mc2, mc3 = st.columns(3)
+            ratio_str  = f"▲{surge_ratio:.2f}倍" if surge_ratio >= 1 else f"▼{surge_ratio:.2f}倍"
+            delta_sign = f"+{surge_ratio - 1:.2f}倍" if surge_ratio >= 1 else f"{surge_ratio - 1:.2f}倍"
+            with mc1:
+                st.metric(
+                    label="📊 出来高急騰率",
+                    value=ratio_str,
+                    delta=delta_sign,
+                    help="直近7日間の平均出来高 ÷ 過去23日間の平均出来高",
+                )
+            with mc2:
+                st.metric(
+                    label="🏆 急騰ランキング",
+                    value=f"{surge_rank}位",
+                    delta=f"全{len(surge_ranking)}社中",
+                    delta_color="off",
+                )
+            with mc3:
+                recent7_vol = st.session_state.daily_series.get(code, [])[-7:]
+                prev23_vol  = st.session_state.daily_series.get(code, [])[-30:-7]
+                if recent7_vol and prev23_vol:
+                    avg_r = sum(d["volume"] for d in recent7_vol) / len(recent7_vol)
+                    avg_p = sum(d["volume"] for d in prev23_vol)  / len(prev23_vol)
+                    unit  = "株" if market == "jp" else "株"
+                    st.metric(
+                        label="直近7日平均出来高",
+                        value=f"{avg_r:,.0f}{unit}",
+                        delta=f"基準比 +{avg_r - avg_p:,.0f}" if avg_r >= avg_p else f"基準比 {avg_r - avg_p:,.0f}",
+                    )
+
         # ── 直近7営業日の株価・出来高テーブル（赤枠部分）──
         daily = st.session_state.daily_series.get(code, [])
         if daily:
@@ -1747,24 +1792,32 @@ if has_analysis or has_charts:
             rows = []
             for idx, d in enumerate(recent7):
                 date_str = f"{d['date'][:4]}/{d['date'][4:6]}/{d['date'][6:]}"
-                close = d["close"]
+                close  = d["close"]
                 volume = int(d["volume"])
 
                 # 最新行（1行目）のみ終値の右に騰落率を表示
                 if is_jp:
                     close_disp = f"{close:,.0f}  {change_str}" if idx == 0 else f"{close:,.0f}"
-                    rows.append({
+                    row = {
                         "日付": date_str,
                         "終値（円）": close_disp,
-                        "出来高（株）": f"{volume:,}",
-                    })
+                    }
                 else:
                     close_disp = f"{close:.2f}  {change_str}" if idx == 0 else f"{close:.2f}"
-                    rows.append({
+                    row = {
                         "日付": date_str,
                         "終値（$）": close_disp,
-                        "出来高（株）": f"{volume:,}",
-                    })
+                    }
+
+                # 急騰モード時：最新行のみ急騰率列を追加、他行は空欄
+                if is_surge_mode and surge_ratio > 0:
+                    row["急騰率"] = (
+                        f"▲{surge_ratio:.2f}倍" if surge_ratio >= 1 else f"▼{surge_ratio:.2f}倍"
+                    ) if idx == 0 else ""
+
+                row["出来高（株）"] = f"{volume:,}"
+                rows.append(row)
+
             st.dataframe(rows, use_container_width=True, hide_index=True)
         else:
             st.info("直近出来高データを取得できませんでした。")
