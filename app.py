@@ -89,6 +89,10 @@ if "daily_series" not in st.session_state:
     st.session_state.daily_series = {}  # code -> [{date, open, high, low, close, volume}, ...]
 if "selected_codes" not in st.session_state:
     st.session_state.selected_codes = set()  # チェックされた銘柄コードのセット
+if "surge_ranking" not in st.session_state:
+    st.session_state.surge_ranking = []      # 急増率ランキング結果
+if "surge_top20_codes" not in st.session_state:
+    st.session_state.surge_top20_codes = set()  # 急騰上位20社のコードセット
 if "market" not in st.session_state:
     st.session_state.market = "jp"   # "jp" または "us"
 
@@ -442,6 +446,22 @@ def render_candlestick_png(series, title: str, max_bars: int = 150):
     buf.seek(0)
     return buf.getvalue()
 
+
+
+def calc_volume_surge_ratio(series: list) -> float:
+    """
+    直近7日間の平均出来高 ÷ 過去23日間の平均出来高 を返す。
+    データが30日未満の場合は 0 を返す。
+    """
+    if len(series) < 30:
+        return 0.0
+    recent7 = series[-7:]
+    prev23  = series[-30:-7]
+    avg_recent = sum(d["volume"] for d in recent7) / len(recent7)
+    avg_prev   = sum(d["volume"] for d in prev23)  / len(prev23)
+    if avg_prev == 0:
+        return 0.0
+    return avg_recent / avg_prev
 
 def fetch_series_from_yfinance(code: str, market: str, tf_key: str) -> list:
     """
@@ -1080,8 +1100,22 @@ with st.sidebar:
         max_value=30,
         value=30,
         step=1,
-        help="「更新」で取得した銘柄リストの上から何社を分析するか指定します。",
+        help="「更新」で取得した銘柄リストの上から何社を分析するか指定します。急騰モード時は無効。",
     )
+
+    st.divider()
+    surge_mode = st.checkbox(
+        "📈 出来高急騰銘柄２０",
+        value=False,
+        help=(
+            "チェックを入れると急騰銘柄探索モードになります。\n"
+            "「グラフのみ」ボタンを押すと、読み込んだ全銘柄の出来高を取得し、\n"
+            "直近7日間の平均出来高 ÷ 過去23日間の平均出来高の比率で\n"
+            "上位20銘柄を自動選定して表示します。"
+        ),
+    )
+    if surge_mode:
+        st.caption("🔍 急騰モード有効：「グラフのみ」を押すと全銘柄を取得して上位20社を自動選定します")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1104,6 +1138,8 @@ if update_clicked:
     st.session_state.charts = {}
     st.session_state.daily_series = {}
     st.session_state.selected_codes = set()
+    st.session_state.surge_ranking = []
+    st.session_state.surge_top20_codes = set()
     if "company_editor" in st.session_state:
         del st.session_state["company_editor"]
     if companies:
@@ -1306,7 +1342,66 @@ if analyze_clicked:
 if chart_only_clicked:
     if not st.session_state.companies:
         st.warning("先に「更新」ボタンまたは手動入力で銘柄リストを取得してください。")
+    elif surge_mode:
+        # ========== 急騰銘柄探索モード ==========
+        market_now = st.session_state.get("market", "jp")
+        all_companies = st.session_state.companies  # 全銘柄を対象
+        total = len(all_companies)
+        progress = st.progress(0.0, text="急騰銘柄を探索中... 全銘柄のデータを取得しています")
+
+        # 全銘柄の日足データ（6ヶ月分）を取得
+        for i, company in enumerate(all_companies):
+            code, name = company["code"], company["name"]
+            if code not in st.session_state.daily_series:
+                try:
+                    series = fetch_series_from_yfinance(code, market_now, "day")
+                    st.session_state.daily_series[code] = series
+                except Exception:
+                    st.session_state.daily_series[code] = []
+            progress.progress(
+                (i + 1) / total,
+                text=f"データ取得中... ({i+1}/{total}) {name}"
+            )
+
+        # 急増率を計算してランキング
+        surge_ranking = []
+        for company in all_companies:
+            code, name = company["code"], company["name"]
+            series = st.session_state.daily_series.get(code, [])
+            ratio = calc_volume_surge_ratio(series)
+            surge_ranking.append({
+                "company": company,
+                "ratio": ratio,
+            })
+        surge_ranking.sort(key=lambda x: x["ratio"], reverse=True)
+
+        # 上位20社のチャートを取得
+        top20 = surge_ranking[:20]
+        top20_codes = {item["company"]["code"] for item in top20}
+        progress2 = st.progress(0.0, text="上位20社のチャートを描画中...")
+        for i, item in enumerate(top20):
+            code = item["company"]["code"]
+            name = item["company"]["name"]
+            if code not in st.session_state.charts:
+                charts, daily = fetch_chart_images(code, name, market=market_now)
+                st.session_state.charts[code] = charts
+                if daily:
+                    st.session_state.daily_series[code] = daily
+            progress2.progress(
+                (i + 1) / 20,
+                text=f"チャート描画中... ({i+1}/20) {name}"
+            )
+
+        progress.empty()
+        progress2.empty()
+
+        # ランキング結果をセッションに保存
+        st.session_state.surge_ranking = surge_ranking
+        st.session_state.surge_top20_codes = top20_codes
+        st.success(f"急騰銘柄探索完了。上位20社を表示します。（対象: {total}社中）")
+
     else:
+        # ========== 通常モード ==========
         selected = st.session_state.get(
             "selected_codes",
             {c["code"] for c in st.session_state.companies[:analyze_count]}
@@ -1342,12 +1437,37 @@ has_charts   = bool(st.session_state.charts)
 if has_analysis or has_charts:
     st.divider()
 
-    # 表示する会社リスト（分析またはチャートがある会社）
-    display_companies = [
-        c for c in st.session_state.companies
-        if c["code"] in st.session_state.analysis
-        or c["code"] in st.session_state.charts
-    ]
+    # 急騰モードの場合は上位20社のみ表示、通常は分析/チャートがある会社を表示
+    top20_codes = st.session_state.get("surge_top20_codes", set())
+    if top20_codes:
+        display_companies = [
+            c for c in st.session_state.companies
+            if c["code"] in top20_codes
+        ]
+    else:
+        display_companies = [
+            c for c in st.session_state.companies
+            if c["code"] in st.session_state.analysis
+            or c["code"] in st.session_state.charts
+        ]
+
+    # 急騰モードのランキング表を表示
+    surge_ranking = st.session_state.get("surge_ranking", [])
+    if surge_ranking and top20_codes:
+        st.subheader("📈 出来高急騰ランキング（上位20社）")
+        st.caption("急増率 = 直近7日間の平均出来高 ÷ 過去23日間の平均出来高")
+        ranking_rows = []
+        for rank, item in enumerate(surge_ranking[:20], 1):
+            c = item["company"]
+            ratio = item["ratio"]
+            ranking_rows.append({
+                "順位": rank,
+                "コード": c["code"],
+                "銘柄名": c["name"],
+                "急増率": f"▲{ratio:.2f}倍" if ratio >= 1 else f"▼{ratio:.2f}倍",
+            })
+        st.dataframe(ranking_rows, use_container_width=True, hide_index=True)
+        st.divider()
 
     # --- ヘッダーとPDFダウンロードボタンを横並びに配置 ---
     col_header, col_pdf = st.columns([3, 1])
