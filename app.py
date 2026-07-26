@@ -1042,6 +1042,20 @@ with st.sidebar:
         help="チェックを外すと日本株版（kabutan.jp）のURLが使われます。",
     )
 
+    surge_mode = st.checkbox(
+        "📈 出来高急騰銘柄２０",
+        value=False,
+        help=(
+            "チェックを入れると急騰銘柄探索モードになります。\n"
+            "「更新」ボタンを押すと、銘柄リストを取得後に自動で全銘柄の\n"
+            "出来高を取得し、直近7日間の平均出来高 ÷ 過去23日間の平均\n"
+            "出来高の比率が高い上位20銘柄を自動選定して表示します。\n"
+            "「米国株版」と組み合わせて使えます。"
+        ),
+    )
+    if surge_mode:
+        st.caption("🔍 急騰モード有効：「更新」を押すと自動で上位20社を選定します")
+
     url_input_jp = st.text_input(
         "対象URL（日本株版 kabutan.jp）",
         value=DEFAULT_URL_JP,
@@ -1100,22 +1114,8 @@ with st.sidebar:
         max_value=30,
         value=30,
         step=1,
-        help="「更新」で取得した銘柄リストの上から何社を分析するか指定します。急騰モード時は無効。",
+        help="「更新」で取得した銘柄リストの上から何社を対象にするか指定します。急騰モード時は全銘柄が対象になります。",
     )
-
-    st.divider()
-    surge_mode = st.checkbox(
-        "📈 出来高急騰銘柄２０",
-        value=False,
-        help=(
-            "チェックを入れると急騰銘柄探索モードになります。\n"
-            "「グラフのみ」ボタンを押すと、読み込んだ全銘柄の出来高を取得し、\n"
-            "直近7日間の平均出来高 ÷ 過去23日間の平均出来高の比率で\n"
-            "上位20銘柄を自動選定して表示します。"
-        ),
-    )
-    if surge_mode:
-        st.caption("🔍 急騰モード有効：「グラフのみ」を押すと全銘柄を取得して上位20社を自動選定します")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1144,6 +1144,51 @@ if update_clicked:
         del st.session_state["company_editor"]
     if companies:
         st.success(f"{market_label}として{len(companies)}件の銘柄を取得しました。")
+        # 急騰モードが有効な場合は自動で出来高解析を実行
+        if surge_mode:
+            progress = st.progress(0.0, text="急騰銘柄を探索中... 全銘柄の出来高データを取得しています")
+            for i, company in enumerate(companies):
+                code, name = company["code"], company["name"]
+                try:
+                    series = fetch_series_from_yfinance(code, market, "day")
+                    st.session_state.daily_series[code] = series
+                except Exception:
+                    st.session_state.daily_series[code] = []
+                progress.progress(
+                    (i + 1) / len(companies),
+                    text=f"出来高データ取得中... ({i+1}/{len(companies)}) {name}"
+                )
+
+            # 急増率でランキング
+            surge_ranking = []
+            for company in companies:
+                code = company["code"]
+                series = st.session_state.daily_series.get(code, [])
+                ratio = calc_volume_surge_ratio(series)
+                surge_ranking.append({"company": company, "ratio": ratio})
+            surge_ranking.sort(key=lambda x: x["ratio"], reverse=True)
+            top20 = surge_ranking[:20]
+            top20_codes = {item["company"]["code"] for item in top20}
+
+            # 上位20社のチャートを取得
+            progress2 = st.progress(0.0, text="上位20社のチャートを描画中...")
+            for i, item in enumerate(top20):
+                code = item["company"]["code"]
+                name = item["company"]["name"]
+                charts, daily = fetch_chart_images(code, name, market=market)
+                st.session_state.charts[code] = charts
+                if daily:
+                    st.session_state.daily_series[code] = daily
+                progress2.progress(
+                    (i + 1) / 20,
+                    text=f"チャート描画中... ({i+1}/20) {name}"
+                )
+
+            progress.empty()
+            progress2.empty()
+            st.session_state.surge_ranking = surge_ranking
+            st.session_state.surge_top20_codes = top20_codes
+            st.success(f"急騰銘柄探索完了。{len(companies)}社中、出来高急騰上位20社を表示します。")
     else:
         st.error(
             "銘柄の自動取得に失敗しました。\n\n"
@@ -1222,7 +1267,43 @@ if not st.session_state.companies:
                 st.session_state.market = market_for_manual
                 st.session_state.analysis = {}
                 st.session_state.charts = {}
-                st.success(f"{len(companies)}件の銘柄を手動設定しました。「分析」ボタンを押してください。")
+                st.session_state.daily_series = {}
+                st.session_state.surge_ranking = []
+                st.session_state.surge_top20_codes = set()
+                if surge_mode:
+                    st.success(f"{len(companies)}件の銘柄を手動設定しました。急騰銘柄探索を開始します...")
+                    prog = st.progress(0.0, text="出来高データを取得中...")
+                    for i, company in enumerate(companies):
+                        code, name = company["code"], company["name"]
+                        try:
+                            series = fetch_series_from_yfinance(code, market_for_manual, "day")
+                            st.session_state.daily_series[code] = series
+                        except Exception:
+                            st.session_state.daily_series[code] = []
+                        prog.progress((i + 1) / len(companies),
+                                      text=f"取得中... ({i+1}/{len(companies)}) {name}")
+                    surge_ranking = []
+                    for company in companies:
+                        series = st.session_state.daily_series.get(company["code"], [])
+                        surge_ranking.append({"company": company, "ratio": calc_volume_surge_ratio(series)})
+                    surge_ranking.sort(key=lambda x: x["ratio"], reverse=True)
+                    top20 = surge_ranking[:20]
+                    top20_codes = {item["company"]["code"] for item in top20}
+                    prog2 = st.progress(0.0, text="上位20社のチャートを描画中...")
+                    for i, item in enumerate(top20):
+                        code, name = item["company"]["code"], item["company"]["name"]
+                        charts, daily = fetch_chart_images(code, name, market=market_for_manual)
+                        st.session_state.charts[code] = charts
+                        if daily:
+                            st.session_state.daily_series[code] = daily
+                        prog2.progress((i + 1) / 20, text=f"チャート... ({i+1}/20) {name}")
+                    prog.empty()
+                    prog2.empty()
+                    st.session_state.surge_ranking = surge_ranking
+                    st.session_state.surge_top20_codes = top20_codes
+                    st.success(f"完了。{len(companies)}社中、急騰上位20社を表示します。")
+                else:
+                    st.success(f"{len(companies)}件の銘柄を手動設定しました。「分析」または「グラフのみ」ボタンを押してください。")
             else:
                 st.warning("銘柄が入力されていません。")
 
