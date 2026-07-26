@@ -1653,12 +1653,15 @@ has_charts   = bool(st.session_state.charts)
 if has_analysis or has_charts:
     st.divider()
 
-    # 急騰モードの場合は上位20社のみ表示、通常は分析/チャートがある会社を表示
-    top20_codes = st.session_state.get("surge_top20_codes", set())
+    # 急騰モードの場合は上位20社のみ・ランキング順で表示、通常は分析/チャートがある会社を表示
+    top20_codes   = st.session_state.get("surge_top20_codes", set())
+    surge_ranking = st.session_state.get("surge_ranking", [])
     if top20_codes:
+        # ランキング順（急増率の高い順）で並べる
         display_companies = [
-            c for c in st.session_state.companies
-            if c["code"] in top20_codes
+            item["company"]
+            for item in surge_ranking[:20]
+            if item["company"]["code"] in top20_codes
         ]
     else:
         display_companies = [
@@ -1666,9 +1669,6 @@ if has_analysis or has_charts:
             if c["code"] in st.session_state.analysis
             or c["code"] in st.session_state.charts
         ]
-
-    # 急騰モードのランキング表を表示
-    surge_ranking = st.session_state.get("surge_ranking", [])
     if surge_ranking and top20_codes:
         st.subheader("📈 出来高急騰ランキング（上位20社）")
         st.caption("急増率 = 直近7日間の平均出来高 ÷ 過去23日間の平均出来高")
