@@ -1121,6 +1121,107 @@ def generate_analysis_pdf(companies, analysis, charts, daily_series=None) -> byt
 
 
 # ----------------------------------------------------------------------
+# 画像から銘柄抽出（Vision API）
+# ----------------------------------------------------------------------
+IMAGE_EXTRACT_PROMPT = """\
+この画像から銘柄コードと銘柄名を全て抽出してください。
+- 日本株: 4桁の数字コード（例: 1693, 7203）と銘柄名
+- 米国株: 英字ティッカー（例: AAPL, NVDA）と銘柄名
+- 重複は除いてください
+- コードと銘柄名のペアのみ抽出し、株価・数量・損益などの数値は不要です
+
+出力は以下のJSON形式のみで返してください（前後に説明文・コードブロック記号は不要）：
+{"stocks": [{"code": "1693", "name": "銅ETF"}, {"code": "1615", "name": "NF銀行業"}]}
+"""
+
+
+def _detect_media_type(image_bytes: bytes) -> str:
+    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    return "image/png"  # デフォルト
+
+
+def _parse_stock_json(text: str) -> list:
+    """AIの返答からJSONを取り出してstocksリストを返す"""
+    text = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE).strip()
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            return data.get("stocks", [])
+        except Exception:
+            pass
+    return []
+
+
+def extract_stocks_from_image_claude(image_bytes: bytes, api_key: str) -> list:
+    import anthropic, base64
+    client = anthropic.Anthropic(api_key=api_key)
+    media_type = _detect_media_type(image_bytes)
+    img_b64 = base64.standard_b64encode(image_bytes).decode()
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {
+                "type": "base64", "media_type": media_type, "data": img_b64}},
+            {"type": "text", "text": IMAGE_EXTRACT_PROMPT},
+        ]}],
+    )
+    return _parse_stock_json(response.content[0].text)
+
+
+def extract_stocks_from_image_grok(image_bytes: bytes, api_key: str) -> list:
+    from openai import OpenAI
+    import base64
+    client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    media_type = _detect_media_type(image_bytes)
+    img_b64 = base64.standard_b64encode(image_bytes).decode()
+    response = client.chat.completions.create(
+        model="grok-4.3",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": [
+            {"type": "image_url",
+             "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
+            {"type": "text", "text": IMAGE_EXTRACT_PROMPT},
+        ]}],
+    )
+    return _parse_stock_json(response.choices[0].message.content)
+
+
+def extract_stocks_from_image_gemini(image_bytes: bytes, api_key: str) -> list:
+    import google.generativeai as genai
+    import base64
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    media_type = _detect_media_type(image_bytes)
+    img_b64 = base64.standard_b64encode(image_bytes).decode()
+    response = model.generate_content([
+        {"mime_type": media_type, "data": img_b64},
+        IMAGE_EXTRACT_PROMPT,
+    ])
+    return _parse_stock_json(response.text)
+
+
+def extract_stocks_from_image(
+    image_bytes: bytes,
+    api_choice: str,
+    claude_api_key: str = "",
+    grok_api_key: str = "",
+    gemini_api_key: str = "",
+) -> list:
+    """選択中のAIエンジンで画像から銘柄を抽出する"""
+    if api_choice == "Claude API（推奨）":
+        return extract_stocks_from_image_claude(image_bytes, claude_api_key)
+    elif api_choice == "Grok API":
+        return extract_stocks_from_image_grok(image_bytes, grok_api_key)
+    else:
+        return extract_stocks_from_image_gemini(image_bytes, gemini_api_key)
+
+
+# ----------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------
 st.title("📈 株探 銘柄探検 分析アプリ")
@@ -1441,6 +1542,87 @@ if not st.session_state.companies:
                     st.success(f"{len(companies)}件の銘柄を手動設定しました。「分析」または「グラフのみ」ボタンを押してください。")
             else:
                 st.warning("銘柄が入力されていません。")
+
+# ----------------------------------------------------------------------
+# 📷 画像から銘柄を取得
+# ----------------------------------------------------------------------
+with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧画面などに対応）", expanded=False):
+    # APIキーチェック
+    active_key = claude_api_key or grok_api_key or gemini_api_key
+    if not active_key:
+        st.warning("サイドバーでいずれかのAI APIキーを入力してください。")
+    else:
+        st.caption(f"使用AI: **{api_choice}** ／ SBI証券・楽天証券・マネックスなどのスクリーンショットに対応")
+
+        uploaded_img = st.file_uploader(
+            "画像ファイルを選択（PNG / JPEG）",
+            type=["png", "jpg", "jpeg"],
+            key="vision_uploader",
+        )
+
+        if uploaded_img is not None:
+            st.image(uploaded_img, caption="アップロードされた画像", use_container_width=True)
+            if st.button("🤖 AIで銘柄を読み取る", use_container_width=False):
+                with st.spinner(f"{api_choice} で画像を解析中..."):
+                    try:
+                        image_bytes = uploaded_img.read()
+                        stocks = extract_stocks_from_image(
+                            image_bytes,
+                            api_choice=api_choice,
+                            claude_api_key=claude_api_key,
+                            grok_api_key=grok_api_key,
+                            gemini_api_key=gemini_api_key,
+                        )
+                        st.session_state["vision_stocks"] = stocks
+                    except Exception as e:
+                        st.error(f"画像解析に失敗しました: {e}")
+                        st.session_state["vision_stocks"] = []
+
+        # 抽出結果の表示・選択
+        vision_stocks = st.session_state.get("vision_stocks", [])
+        if vision_stocks:
+            st.success(f"{len(vision_stocks)}件の銘柄を検出しました。追加する銘柄にチェックを入れてください。")
+            vision_rows = [
+                {"追加": True, "コード": s["code"], "銘柄名": s["name"]}
+                for s in vision_stocks
+            ]
+            edited_vision = st.data_editor(
+                vision_rows,
+                column_config={
+                    "追加": st.column_config.CheckboxColumn("追加", default=True),
+                    "コード": st.column_config.TextColumn("コード", disabled=True),
+                    "銘柄名": st.column_config.TextColumn("銘柄名", disabled=True),
+                },
+                disabled=["コード", "銘柄名"],
+                hide_index=True,
+                use_container_width=True,
+                key="vision_editor",
+            )
+            if st.button("➕ チェックした銘柄をリストに追加", key="vision_add_btn"):
+                to_add = [
+                    {"code": r["コード"], "name": r["銘柄名"]}
+                    for r in edited_vision if r["追加"]
+                ]
+                if to_add:
+                    existing = {c["code"] for c in st.session_state.companies}
+                    added = []
+                    for c in to_add:
+                        if c["code"] not in existing:
+                            st.session_state.companies.append(c)
+                            existing.add(c["code"])
+                            added.append(c["name"])
+                    if "company_editor" in st.session_state:
+                        del st.session_state["company_editor"]
+                    st.session_state["vision_stocks"] = []
+                    if added:
+                        st.success(f"追加しました: {', '.join(added)}")
+                    else:
+                        st.info("選択した銘柄はすでにリストに含まれています。")
+                else:
+                    st.warning("追加する銘柄にチェックを入れてください。")
+        elif "vision_stocks" in st.session_state and st.session_state["vision_stocks"] == []:
+            if uploaded_img:
+                st.warning("銘柄を検出できませんでした。別の画像を試してください。")
 
 # 現在の銘柄リストをチェックボックス付きで表示
 if st.session_state.companies:
