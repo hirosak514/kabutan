@@ -1624,6 +1624,122 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
             if uploaded_img:
                 st.warning("銘柄を検出できませんでした。別の画像を試してください。")
 
+# ----------------------------------------------------------------------
+# 💾 銘柄リストの保存・読み込み
+# ----------------------------------------------------------------------
+with st.expander("💾 銘柄リストの保存・読み込み", expanded=False):
+    save_col, load_col = st.columns(2)
+
+    # ── 保存（CSVダウンロード）──
+    with save_col:
+        st.subheader("📥 保存")
+        if st.session_state.companies:
+            import io as _io, csv as _csv, datetime as _dt
+            list_name = st.text_input(
+                "リスト名（ファイル名に使用）",
+                value="銘柄リスト",
+                key="csv_save_name",
+            )
+            # CSV生成
+            buf = _io.StringIO()
+            writer = _csv.writer(buf)
+            # 1行目にメタ情報（リスト名・保存日時・市場）
+            writer.writerow([
+                f"# {list_name}",
+                f"保存日時:{_dt.datetime.now().strftime('%Y/%m/%d %H:%M')}",
+                f"市場:{st.session_state.get('market','jp')}",
+            ])
+            writer.writerow(["code", "name"])
+            for c in st.session_state.companies:
+                writer.writerow([c["code"], c["name"]])
+            csv_str = buf.getvalue()
+            filename = f"{list_name}_{_dt.date.today().strftime('%Y%m%d')}.csv"
+            st.download_button(
+                label=f"📥 CSVをダウンロード（{len(st.session_state.companies)}社）",
+                data=csv_str.encode("utf-8-sig"),  # Excel対応のBOM付きUTF-8
+                file_name=filename,
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.caption("ExcelやGoogleスプレッドシートでも開けます。")
+        else:
+            st.info("銘柄リストが空です。先に銘柄を取得・入力してください。")
+
+    # ── 読み込み（CSVアップロード）──
+    with load_col:
+        st.subheader("📂 読み込み")
+        uploaded_csv = st.file_uploader(
+            "CSVファイルを選択",
+            type=["csv"],
+            key="csv_uploader",
+            help="このアプリで保存したCSV、またはコード・名前の2列CSVに対応",
+        )
+        replace_or_add = st.radio(
+            "読み込み方式",
+            options=["現在のリストを置き換える", "現在のリストに追加する"],
+            index=0,
+            key="csv_load_mode",
+            horizontal=True,
+        )
+        if uploaded_csv is not None:
+            if st.button("📂 このCSVを読み込む", use_container_width=True):
+                try:
+                    import io as _io, csv as _csv
+                    content = uploaded_csv.read().decode("utf-8-sig")
+                    reader = _csv.reader(_io.StringIO(content))
+                    loaded = []
+                    seen = set()
+                    market_from_csv = None
+                    for row in reader:
+                        if not row:
+                            continue
+                        # メタ行（#で始まる）から市場情報を取得
+                        if row[0].startswith("#"):
+                            for cell in row:
+                                if cell.startswith("市場:"):
+                                    market_from_csv = cell.replace("市場:", "").strip()
+                            continue
+                        # ヘッダー行をスキップ
+                        if row[0].lower() in ("code", "コード"):
+                            continue
+                        code = row[0].strip()
+                        name = row[1].strip() if len(row) > 1 else code
+                        if code and code not in seen:
+                            seen.add(code)
+                            loaded.append({"code": code, "name": name})
+
+                    if loaded:
+                        if replace_or_add == "現在のリストを置き換える":
+                            st.session_state.companies = loaded
+                            st.session_state.analysis = {}
+                            st.session_state.charts = {}
+                            st.session_state.daily_series = {}
+                            st.session_state.surge_ranking = []
+                            st.session_state.surge_top20_codes = set()
+                            if "company_editor" in st.session_state:
+                                del st.session_state["company_editor"]
+                            if market_from_csv:
+                                st.session_state.market = market_from_csv
+                            st.success(f"{len(loaded)}件の銘柄を読み込みました。")
+                        else:
+                            existing = {c["code"] for c in st.session_state.companies}
+                            added_count = 0
+                            for c in loaded:
+                                if c["code"] not in existing:
+                                    st.session_state.companies.append(c)
+                                    existing.add(c["code"])
+                                    added_count += 1
+                            if "company_editor" in st.session_state:
+                                del st.session_state["company_editor"]
+                            st.success(
+                                f"{added_count}件を追加しました。"
+                                f"（重複{len(loaded) - added_count}件はスキップ）"
+                            )
+                    else:
+                        st.warning("有効な銘柄データが見つかりませんでした。")
+                except Exception as e:
+                    st.error(f"CSVの読み込みに失敗しました: {e}")
+
 # 現在の銘柄リストをチェックボックス付きで表示
 if st.session_state.companies:
     st.subheader("取得した銘柄リスト")
