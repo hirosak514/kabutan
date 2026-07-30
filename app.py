@@ -422,9 +422,9 @@ def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
     market: "jp"=kabutan.jp（日本株）, "us"=us.kabutan.jp（米国株）
     """
     ts = int(time.time() * 1000)
-    if market == "us":
-        # 米国株版: ドメインは chart.us.kabutan.jp、パスは /chart/read.php
-        # （実際のNetworkログから確認済み）
+    # 英字のみのコード（例: MBLY, SOFI）は market 設定に関わらず米国株として扱う
+    effective_market = "us" if re.fullmatch(r"[A-Z]{1,6}", code.upper()) else market
+    if effective_market == "us":
         url = f"https://chart.us.kabutan.jp/chart/read.php?c={code}&m={m}&k=1&{ts}"
         referer = f"https://us.kabutan.jp/stocks/{code}/chart"
     else:
@@ -468,9 +468,8 @@ def fetch_kabutan_series(code: str, m: int, market: str = "jp"):
 
         # 日本株版のAPIは価格を「0.1円単位（実際の10倍）」で返すため÷10が必要。
         # 米国株版のAPIはドル建ての実際の株価をそのまま返すため補正不要。
-        # 例（日本株）: 実際2,748円 → API返却値27480 → ÷10で補正
-        # 例（米国株）: 実際$3.65  → API返却値3.65  → そのまま使用
-        if market != "us":
+        # 英字のみのコードは米国株として補正をスキップする。
+        if effective_market != "us":
             o, h, l, c = o / 10, h / 10, l / 10, c / 10
 
         series.append({"date": date, "open": o, "high": h, "low": l,
@@ -561,13 +560,26 @@ def fetch_series_from_yfinance(code: str, market: str, tf_key: str) -> list:
     [{"date":..,"open":..,"high":..,"low":..,"close":..,"volume":..}, ...]
     形式のリストを返す。
     市場: "jp" → コード.T (東証)、"us" → ティッカーそのまま
+
+    ※ 画像読み取りなどでmarket="jp"のままUS株コード（英字）が混入した場合でも
+      コード形式を自動判定して正しいティッカーに変換する。
+      英字のみで構成されるコード（例: MBLY, SOFI）は米国株として扱う。
     tf_key: "day"=日足(6ヶ月) / "week"=週足(2年) / "month"=月足(5年)
     """
     import yfinance as yf
 
-    ticker_symbol = f"{code}.T" if market == "jp" else code
-    period_map  = {"day": "6mo",  "week": "2y",  "month": "5y"}
-    interval_map = {"day": "1d",  "week": "1wk", "month": "1mo"}
+    # コード形式で市場を自動判定
+    # 英字のみ（1〜6文字）→ 米国株ティッカーとして扱う
+    # 数字始まり or 英数字混合4文字 → 日本株として".T"を付ける
+    if re.fullmatch(r"[A-Z]{1,6}", code.upper()):
+        ticker_symbol = code.upper()        # 米国株: そのまま
+    elif market == "jp":
+        ticker_symbol = f"{code}.T"         # 日本株: .T付き
+    else:
+        ticker_symbol = code.upper()        # 米国株: そのまま
+
+    period_map   = {"day": "6mo",  "week": "2y",  "month": "5y"}
+    interval_map = {"day": "1d",   "week": "1wk", "month": "1mo"}
 
     hist = yf.Ticker(ticker_symbol).history(
         period=period_map[tf_key],
