@@ -1637,6 +1637,300 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
                 st.warning("銘柄を検出できませんでした。別の画像を試してください。")
 
 # ----------------------------------------------------------------------
+# 📰 ニュース銘柄検索（yfinance決算カレンダー + AI Web検索）
+# ----------------------------------------------------------------------
+def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
+    """
+    yfinanceの決算カレンダーを使って、今日〜N日後に決算予定の銘柄を返す。
+    target: "jp"=日本株のみ / "us"=米国株のみ / "both"=両方
+    """
+    import yfinance as yf
+    from datetime import date, timedelta
+
+    today    = date.today()
+    deadline = today + timedelta(days=days)
+    results  = []
+
+    candidates = []
+    if target in ("jp", "both"):
+        candidates += [(code, name, "jp") for code, name in NIKKEI225_STOCKS]
+    if target in ("us", "both"):
+        candidates += [(code, name, "us") for code, name in DOW30_STOCKS]
+
+    for code, name, mkt in candidates:
+        symbol = f"{code}.T" if mkt == "jp" else code
+        try:
+            cal = yf.Ticker(symbol).calendar
+            if cal is None:
+                continue
+            # calはdict or DataFrameの場合がある
+            earn_dates = []
+            if isinstance(cal, dict):
+                raw = cal.get("Earnings Date", [])
+                earn_dates = raw if isinstance(raw, list) else [raw]
+            elif hasattr(cal, "get"):
+                raw = cal.get("Earnings Date", [])
+                earn_dates = raw if isinstance(raw, list) else [raw]
+
+            for ed in earn_dates:
+                # Timestamp → date に変換
+                if hasattr(ed, "date"):
+                    ed = ed.date()
+                if isinstance(ed, date) and today <= ed <= deadline:
+                    results.append({
+                        "code":   code,
+                        "name":   name,
+                        "event":  "決算発表（予定）",
+                        "date":   ed.strftime("%Y/%m/%d"),
+                        "market": mkt,
+                        "source": "yfinance",
+                    })
+                    break
+        except Exception:
+            continue
+
+    return results
+
+
+def get_upcoming_events_ai(
+    days: int, api_choice: str,
+    claude_api_key: str = "", grok_api_key: str = "",
+    gemini_api_key: str = "", target: str = "both",
+) -> list:
+    """
+    AIのWeb検索を使って今後N日間の重要企業イベント銘柄を取得する。
+    決算以外のM&A・新製品・ガイダンス修正なども対象。
+    """
+    from datetime import date, timedelta
+    import anthropic as _anthropic
+
+    today    = date.today()
+    deadline = today + timedelta(days=days)
+    today_s  = today.strftime("%Y年%m月%d日")
+    dead_s   = deadline.strftime("%Y年%m月%d日")
+
+    target_str = {
+        "jp":   "日本株（東証上場企業）",
+        "us":   "米国株（NYSE・NASDAQ上場企業）",
+        "both": "日本株（東証）・米国株（NYSE/NASDAQ）の両方",
+    }[target]
+
+    prompt = f"""本日は{today_s}です。
+{today_s}から{dead_s}までの間に、{target_str}の企業で
+以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
+Web検索して調べ、できるだけ多くリストアップしてください：
+
+- 決算発表・四半期決算・通期決算
+- 業績予想・ガイダンスの修正・上方修正・下方修正
+- M&A・合併・買収・資本業務提携の発表
+- 新製品・新サービス・新技術の発表
+- 重要な規制当局の承認・却下・ヒアリング
+- 株主総会・取締役会の重要決議
+- その他、株価に大きく影響しうるコーポレートイベント
+
+出力は必ず以下のJSON形式のみで返してください
+（前後に説明文・コードブロック記号不要）：
+{{"events": [
+  {{"code": "7203", "name": "トヨタ自動車", "market": "jp",
+    "event": "2026年3月期通期決算発表", "date": "{today.strftime('%Y/%m/%d')}"}},
+  {{"code": "AAPL", "name": "Apple Inc.", "market": "us",
+    "event": "Q3決算発表", "date": "{today.strftime('%Y/%m/%d')}"}}
+]}}"""
+
+    text = ""
+    try:
+        if api_choice == "Claude API（推奨）":
+            client = _anthropic.Anthropic(api_key=claude_api_key)
+            tools = [{"type": "web_search_20250305", "name": "web_search"}]
+            messages = [{"role": "user", "content": prompt}]
+            while True:
+                resp = client.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=3000,
+                    tools=tools, messages=messages,
+                )
+                messages.append({"role": "assistant", "content": resp.content})
+                if resp.stop_reason == "end_turn":
+                    break
+                tool_results = [
+                    {"type": "tool_result", "tool_use_id": b.id, "content": ""}
+                    for b in resp.content if b.type == "tool_use"
+                ]
+                if tool_results:
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    break
+            text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+
+        elif api_choice == "Grok API":
+            from openai import OpenAI as _OAI
+            client = _OAI(api_key=grok_api_key, base_url="https://api.x.ai/v1")
+            resp = client.responses.create(
+                model="grok-4.3", input=[{"role": "user", "content": prompt}],
+                tools=[{"type": "web_search"}],
+            )
+            text = resp.output_text
+
+        else:  # Gemini
+            import google.generativeai as _genai
+            _genai.configure(api_key=gemini_api_key)
+            model = _genai.GenerativeModel("gemini-2.5-flash")
+            search_tool = _genai.protos.Tool(
+                google_search=_genai.protos.GoogleSearch()
+            )
+            resp = model.generate_content(prompt, tools=[search_tool])
+            text = resp.text
+    except Exception as e:
+        return []
+
+    # JSON解析
+    text = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+        return data.get("events", [])
+    except Exception:
+        return []
+
+
+def merge_news_results(yf_results: list, ai_results: list) -> list:
+    """yfinanceとAIの結果を統合・重複除去する"""
+    merged = {}
+    for item in yf_results:
+        code = item["code"]
+        if code not in merged:
+            merged[code] = item.copy()
+            merged[code]["events"] = [f"{item['event']}（{item['date']}）"]
+        else:
+            merged[code]["events"].append(f"{item['event']}（{item['date']}）")
+
+    for item in ai_results:
+        code = item.get("code", "")
+        if not code:
+            continue
+        date_s = item.get("date", "")
+        event  = item.get("event", "")
+        if code not in merged:
+            merged[code] = {
+                "code":   code,
+                "name":   item.get("name", code),
+                "market": item.get("market", ""),
+                "source": "AI検索",
+                "events": [f"{event}（{date_s}）"],
+            }
+        else:
+            merged[code]["events"].append(f"{event}（{date_s}）")
+            if merged[code].get("source") == "yfinance":
+                merged[code]["source"] = "yfinance + AI検索"
+
+    return list(merged.values())
+
+
+# ── ニュース銘柄検索UI ──
+with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を自動ピックアップ）", expanded=False):
+    active_key = claude_api_key or grok_api_key or gemini_api_key
+    if not active_key:
+        st.warning("サイドバーでいずれかのAI APIキーを入力してください。")
+    else:
+        st.caption(
+            f"使用AI: **{api_choice}** ／ "
+            "yfinanceの決算カレンダー＋AIのWeb検索を組み合わせて検索します"
+        )
+        nc1, nc2 = st.columns(2)
+        with nc1:
+            news_target = st.radio(
+                "対象市場",
+                options=["日本株・米国株 両方", "日本株のみ", "米国株のみ"],
+                index=0, horizontal=True, key="news_target",
+            )
+        with nc2:
+            news_days = st.slider(
+                "検索期間（本日からN日後まで）",
+                min_value=1, max_value=7, value=3, key="news_days",
+            )
+
+        target_map = {
+            "日本株・米国株 両方": "both",
+            "日本株のみ":          "jp",
+            "米国株のみ":          "us",
+        }
+        target_code = target_map[news_target]
+
+        if st.button("📰 重要発表銘柄を検索", use_container_width=False, key="news_search_btn"):
+            with st.spinner("① yfinanceで決算カレンダーを確認中..."):
+                yf_results = get_upcoming_earnings_yfinance(
+                    days=news_days, target=target_code
+                )
+            st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
+
+            with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
+                ai_results = get_upcoming_events_ai(
+                    days=news_days, api_choice=api_choice,
+                    claude_api_key=claude_api_key,
+                    grok_api_key=grok_api_key,
+                    gemini_api_key=gemini_api_key,
+                    target=target_code,
+                )
+            st.caption(f"AI Web検索: {len(ai_results)}件を取得")
+
+            merged = merge_news_results(yf_results, ai_results)
+            st.session_state["news_results"] = merged
+
+        # 検索結果の表示
+        news_results = st.session_state.get("news_results", [])
+        if news_results:
+            from datetime import date as _date
+            st.success(f"合計 **{len(news_results)}件** の重要イベント銘柄を検出しました。")
+            news_rows = []
+            for item in news_results:
+                news_rows.append({
+                    "追加": True,
+                    "コード": item["code"],
+                    "銘柄名": item["name"],
+                    "市場": "🇯🇵 日本株" if item.get("market") == "jp" else "🇺🇸 米国株",
+                    "イベント": " / ".join(item.get("events", [])),
+                    "情報源": item.get("source", ""),
+                })
+            edited_news = st.data_editor(
+                news_rows,
+                column_config={
+                    "追加": st.column_config.CheckboxColumn("追加", default=True),
+                    "コード": st.column_config.TextColumn("コード", disabled=True),
+                    "銘柄名": st.column_config.TextColumn("銘柄名", disabled=True),
+                    "市場": st.column_config.TextColumn("市場", disabled=True),
+                    "イベント": st.column_config.TextColumn("イベント内容", disabled=True, width="large"),
+                    "情報源": st.column_config.TextColumn("情報源", disabled=True),
+                },
+                disabled=["コード", "銘柄名", "市場", "イベント", "情報源"],
+                hide_index=True,
+                use_container_width=True,
+                key="news_editor",
+            )
+            if st.button("➕ チェックした銘柄をリストに追加", key="news_add_btn"):
+                to_add = [
+                    {"code": r["コード"], "name": r["銘柄名"]}
+                    for r in edited_news if r["追加"]
+                ]
+                if to_add:
+                    existing = {c["code"] for c in st.session_state.companies}
+                    added = []
+                    for c in to_add:
+                        if c["code"] not in existing:
+                            st.session_state.companies.append(c)
+                            existing.add(c["code"])
+                            added.append(c["name"])
+                    if "company_editor" in st.session_state:
+                        del st.session_state["company_editor"]
+                    st.session_state["news_results"] = []
+                    if added:
+                        st.success(f"追加しました: {', '.join(added)}")
+                    else:
+                        st.info("選択した銘柄はすでにリストに含まれています。")
+                else:
+                    st.warning("追加する銘柄にチェックを入れてください。")
+
+# ----------------------------------------------------------------------
 # 💾 銘柄リストの保存・読み込み
 # ----------------------------------------------------------------------
 with st.expander("💾 銘柄リストの保存・読み込み", expanded=False):
