@@ -185,6 +185,10 @@ if "surge_ranking" not in st.session_state:
     st.session_state.surge_ranking = []      # 急増率ランキング結果
 if "surge_top20_codes" not in st.session_state:
     st.session_state.surge_top20_codes = set()  # 急騰上位20社のコードセット
+if "trend_ranking" not in st.session_state:
+    st.session_state.trend_ranking = []         # AIトレンド判定結果
+if "trend_sort_active" not in st.session_state:
+    st.session_state.trend_sort_active = False  # トレンドソート有効フラグ
 if "market" not in st.session_state:
     st.session_state.market = "jp"   # "jp" または "us"
 
@@ -1234,6 +1238,141 @@ def extract_stocks_from_image(
 
 
 # ----------------------------------------------------------------------
+# AIトレンド判定（数値スコアリング + Vision API）
+# ----------------------------------------------------------------------
+TREND_LABELS = {
+    "強い上昇": ("🟢", 5), "上昇": ("🟡", 4),
+    "横ばい":   ("⚪", 3), "下降": ("🔴", 2), "強い下降": ("🔴", 1),
+}
+TF_LABEL = {"day": "日足", "week": "週足", "month": "月足"}
+
+
+def calc_trend_score(series_day: list, series_week: list, series_month: list):
+    """
+    数値データからトレンドスコアを計算する（0〜6点）。
+    日足・週足・月足それぞれ2点満点。
+    戻り値: (total_score, {"day": 0-2, "week": 0-2, "month": 0-2})
+    """
+    score = 0
+    details = {"day": 0, "week": 0, "month": 0}
+
+    # ── 日足 ──
+    if len(series_day) >= 25:
+        closes = [d["close"] for d in series_day]
+        ma5  = sum(closes[-5:]) / 5
+        ma25 = sum(closes[-25:]) / 25
+        if closes[-1] > ma25:   score += 1; details["day"] += 1  # 終値 > MA25
+        if ma5 > ma25:          score += 1; details["day"] += 1  # MA5 > MA25（GC状態）
+
+    # ── 週足 ──
+    if len(series_week) >= 4:
+        wc = [d["close"] for d in series_week[-4:]]
+        rising = sum(1 for i in range(1, len(wc)) if wc[i] >= wc[i - 1])
+        if rising >= 2:         score += 1; details["week"] += 1  # 4週中2週以上上昇
+        if wc[-1] > wc[0]:     score += 1; details["week"] += 1  # 4週前より高値
+
+    # ── 月足 ──
+    if len(series_month) >= 3:
+        mc = [d["close"] for d in series_month[-3:]]
+        if mc[-1] > mc[-2]:    score += 1; details["month"] += 1  # 前月より上昇
+        if mc[-1] > mc[0]:     score += 1; details["month"] += 1  # 3ヶ月前より高値
+
+    return score, details
+
+
+def _score_to_symbol(s: int) -> str:
+    return {2: "◎", 1: "○", 0: "△"}[s]
+
+
+def judge_trend_vision(
+    code: str, name: str, charts: dict,
+    api_choice: str,
+    claude_api_key: str = "", grok_api_key: str = "", gemini_api_key: str = "",
+) -> dict | None:
+    """
+    チャート画像（日足・週足・月足）をVision APIに送りトレンドを判定する。
+    戻り値: {"day_trend":..,"week_trend":..,"month_trend":..,"overall":..,"confidence":1-5,"comment":...}
+    """
+    import base64
+
+    images = [
+        (charts[tf], TF_LABEL[tf])
+        for tf in ("day", "week", "month")
+        if charts.get(tf)
+    ]
+    if not images:
+        return None
+
+    prompt = (
+        f"{name}（コード: {code}）の株価チャートです。"
+        f"{'・'.join(lbl for _, lbl in images)}の順に提示します。\n\n"
+        "各チャートのトレンドを判定し、必ず以下のJSON形式のみで返してください"
+        "（前後の説明文・コードブロック記号不要）：\n"
+        '{"day_trend":"上昇|横ばい|下降",'
+        '"week_trend":"上昇|横ばい|下降",'
+        '"month_trend":"上昇|横ばい|下降",'
+        '"overall":"強い上昇|上昇|横ばい|下降|強い下降",'
+        '"confidence":1から5の整数,'
+        '"comment":"判定理由を1文で"}'
+    )
+
+    def parse(text: str) -> dict | None:
+        text = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                pass
+        return None
+
+    try:
+        if api_choice == "Claude API（推奨）":
+            import anthropic as _anth
+            content = []
+            for png, _ in images:
+                b64 = base64.standard_b64encode(png).decode()
+                content.append({"type": "image",
+                                 "source": {"type": "base64",
+                                            "media_type": "image/png", "data": b64}})
+            content.append({"type": "text", "text": prompt})
+            resp = _anth.Anthropic(api_key=claude_api_key).messages.create(
+                model="claude-sonnet-4-6", max_tokens=600,
+                messages=[{"role": "user", "content": content}],
+            )
+            return parse(resp.content[0].text)
+
+        elif api_choice == "Grok API":
+            from openai import OpenAI as _OAI
+            content = []
+            for png, _ in images:
+                b64 = base64.standard_b64encode(png).decode()
+                content.append({"type": "image_url",
+                                 "image_url": {"url": f"data:image/png;base64,{b64}"}})
+            content.append({"type": "text", "text": prompt})
+            resp = _OAI(api_key=grok_api_key,
+                        base_url="https://api.x.ai/v1").chat.completions.create(
+                model="grok-4.3", max_tokens=600,
+                messages=[{"role": "user", "content": content}],
+            )
+            return parse(resp.choices[0].message.content)
+
+        else:  # Gemini
+            import google.generativeai as _genai
+            _genai.configure(api_key=gemini_api_key)
+            parts = []
+            for png, _ in images:
+                b64 = base64.standard_b64encode(png).decode()
+                parts.append({"mime_type": "image/png", "data": b64})
+            parts.append(prompt)
+            resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(parts)
+            return parse(resp.text)
+
+    except Exception:
+        return None
+
+
+# ----------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------
 st.title("📈 株探 銘柄探検 分析アプリ")
@@ -1345,6 +1484,8 @@ if update_clicked:
     st.session_state.selected_codes = set()
     st.session_state.surge_ranking = []
     st.session_state.surge_top20_codes = set()
+    st.session_state.trend_ranking = []
+    st.session_state.trend_sort_active = False
     if "company_editor" in st.session_state:
         del st.session_state["company_editor"]
     if companies:
@@ -2289,13 +2430,22 @@ if has_analysis or has_charts:
         st.dataframe(ranking_rows, use_container_width=True, hide_index=True)
         st.divider()
 
-    # --- ヘッダーとPDFダウンロードボタンを横並びに配置 ---
-    col_header, col_pdf = st.columns([3, 1])
+    # --- ヘッダー / PDF / AIトレンド判定ボタンを横並びに配置 ---
+    col_header, col_trend, col_pdf = st.columns([3, 1, 1])
     with col_header:
         mode_label = "分析結果" if has_analysis else "グラフ一覧"
         st.header(mode_label)
+    with col_trend:
+        st.write("")
+        trend_btn_disabled = not bool(st.session_state.charts)
+        ai_trend_clicked = st.button(
+            "🔍 AIトレンド判定",
+            use_container_width=True,
+            disabled=trend_btn_disabled,
+            help="チャート取得済みの銘柄を数値分析+Vision AIで上昇トレンド判定します",
+        )
     with col_pdf:
-        st.write("")  # 垂直位置調整
+        st.write("")
         with st.spinner("PDF生成中..."):
             try:
                 pdf_bytes = generate_analysis_pdf(
@@ -2316,6 +2466,142 @@ if has_analysis or has_charts:
                 )
             except Exception as e:
                 st.error(f"PDF生成失敗: {e}")
+
+    # ── AIトレンド判定の処理 ──
+    if ai_trend_clicked:
+        active_key = claude_api_key or grok_api_key or gemini_api_key
+        if not active_key:
+            st.warning("サイドバーでAI APIキーを入力してください。")
+        else:
+            target_companies_for_trend = display_companies
+
+            # ① 数値スコアリング（全銘柄・無料）
+            num_scores = {}
+            for c in target_companies_for_trend:
+                code = c["code"]
+                sd = st.session_state.daily_series.get(code, [])
+                sw = []
+                sm = []
+                # 週足・月足データが無ければ取得
+                for tf_key, store_key in [("week", "_week"), ("month", "_month")]:
+                    data = st.session_state.get(f"series_{tf_key}_{code}", [])
+                    if not data and st.session_state.charts.get(code):
+                        try:
+                            data = fetch_series_from_yfinance(
+                                code, st.session_state.get("market", "jp"), tf_key
+                            )
+                            st.session_state[f"series_{tf_key}_{code}"] = data
+                        except Exception:
+                            data = []
+                    if tf_key == "week":
+                        sw = data
+                    else:
+                        sm = data
+                score, details = calc_trend_score(sd, sw, sm)
+                num_scores[code] = {"score": score, "details": details, "company": c}
+
+            # ② 数値スコア上位半分をVision APIで詳細判定
+            sorted_by_num = sorted(
+                num_scores.items(), key=lambda x: x[1]["score"], reverse=True
+            )
+            vision_threshold = max(3, len(sorted_by_num) // 2)
+            vision_targets = sorted_by_num[:vision_threshold]
+
+            progress = st.progress(0.0, text="Vision AIでトレンドを判定中...")
+            vision_results = {}
+            for i, (code, info) in enumerate(vision_targets):
+                name = info["company"]["name"]
+                charts_for_code = st.session_state.charts.get(code, {})
+                result = judge_trend_vision(
+                    code, name, charts_for_code,
+                    api_choice=api_choice,
+                    claude_api_key=claude_api_key,
+                    grok_api_key=grok_api_key,
+                    gemini_api_key=gemini_api_key,
+                )
+                vision_results[code] = result
+                progress.progress(
+                    (i + 1) / len(vision_targets),
+                    text=f"Vision判定中... ({i+1}/{len(vision_targets)}) {name}",
+                )
+            progress.empty()
+
+            # ③ 結果を統合してランキング化
+            overall_order = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
+            trend_ranking = []
+            for code, info in num_scores.items():
+                vr = vision_results.get(code)
+                overall = vr["overall"] if vr else (
+                    "上昇" if info["score"] >= 5 else
+                    "横ばい" if info["score"] >= 3 else "下降"
+                )
+                confidence = vr.get("confidence", 3) if vr else info["score"]
+                comment = vr.get("comment", "") if vr else ""
+                trend_ranking.append({
+                    "code":       code,
+                    "name":       info["company"]["name"],
+                    "num_score":  info["score"],
+                    "details":    info["details"],
+                    "overall":    overall,
+                    "confidence": confidence,
+                    "comment":    comment,
+                    "day_trend":  vr.get("day_trend",   "") if vr else "",
+                    "week_trend": vr.get("week_trend",  "") if vr else "",
+                    "month_trend":vr.get("month_trend", "") if vr else "",
+                })
+            # 総合判定スコア → 確信度 → 数値スコアの順で降順ソート
+            trend_ranking.sort(
+                key=lambda x: (
+                    overall_order.get(x["overall"], 0),
+                    x["confidence"],
+                    x["num_score"],
+                ),
+                reverse=True,
+            )
+            st.session_state.trend_ranking  = trend_ranking
+            st.session_state.trend_sort_active = True
+            st.success("AIトレンド判定が完了しました。グラフの表示順をランキング順に変更しました。")
+
+    # ── トレンドランキング表の表示 ──
+    trend_ranking = st.session_state.get("trend_ranking", [])
+    if trend_ranking and st.session_state.get("trend_sort_active"):
+        st.subheader("📊 AIトレンド判定ランキング")
+        st.caption(
+            "数値スコア（MA/価格動向）でまず絞り込み、上位銘柄をVision AIが詳細判定。"
+            "グラフの表示順もこのランキング順に変更されています。"
+        )
+
+        # ランキング表
+        rank_rows = []
+        for i, item in enumerate(trend_ranking, 1):
+            icon, _ = TREND_LABELS.get(item["overall"], ("⚪", 3))
+            d = item["details"]
+            rank_rows.append({
+                "順位": i,
+                "銘柄": f"{item['name']}（{item['code']}）",
+                "総合判定": f"{icon} {item['overall']}",
+                "日足": f"{_score_to_symbol(d['day'])} {item.get('day_trend','')}",
+                "週足": f"{_score_to_symbol(d['week'])} {item.get('week_trend','')}",
+                "月足": f"{_score_to_symbol(d['month'])} {item.get('month_trend','')}",
+                "確信度": "★" * item["confidence"] + "☆" * (5 - item["confidence"]),
+                "AIコメント": item.get("comment", ""),
+            })
+        st.dataframe(rank_rows, use_container_width=True, hide_index=True)
+
+        if st.button("🔄 ランキングをリセットして元の順序に戻す",
+                     key="reset_trend_btn"):
+            st.session_state.trend_ranking  = []
+            st.session_state.trend_sort_active = False
+            st.rerun()
+
+        st.divider()
+
+        # トレンドランキング順にdisplay_companiesを並び替える
+        code_rank = {item["code"]: i for i, item in enumerate(trend_ranking)}
+        display_companies = sorted(
+            display_companies,
+            key=lambda c: code_rank.get(c["code"], 999),
+        )
 
     LABELS = {
         "company_overview": "① どのような会社か",
