@@ -3094,7 +3094,25 @@ if has_analysis or has_charts:
                 "確信度": "★" * item["confidence"] + "☆" * (5 - item["confidence"]),
                 "AIコメント": item.get("comment", ""),
             })
-        st.dataframe(rank_rows, use_container_width=True, hide_index=True)
+        st.dataframe(
+            rank_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "順位":     st.column_config.NumberColumn("順位", width="small"),
+                "銘柄":     st.column_config.TextColumn("銘柄", width="medium"),
+                "総合判定": st.column_config.TextColumn("総合判定", width="small"),
+                "日足":     st.column_config.TextColumn("日足", width="small"),
+                "週足":     st.column_config.TextColumn("週足", width="small"),
+                "月足":     st.column_config.TextColumn("月足", width="small"),
+                "確信度":   st.column_config.TextColumn("確信度", width="small"),
+                "AIコメント": st.column_config.TextColumn(
+                    "AIコメント",
+                    width="large",
+                    help="AIによるトレンド判定コメント（全文表示）",
+                ),
+            },
+        )
 
         if st.button("🔄 ランキングをリセットして元の順序に戻す",
                      key="reset_trend_btn"):
