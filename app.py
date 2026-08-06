@@ -2707,8 +2707,8 @@ if has_analysis or has_charts:
         st.dataframe(ranking_rows, use_container_width=True, hide_index=True)
         st.divider()
 
-    # --- ヘッダー / PDF / AIトレンド判定ボタンを横並びに配置 ---
-    col_header, col_trend, col_pdf = st.columns([3, 1, 1])
+    # --- ヘッダー / AIトレンド判定 / CSVボタン / PDF ボタンを横並びに配置 ---
+    col_header, col_trend, col_csv, col_pdf = st.columns([3, 1, 1, 1])
     with col_header:
         mode_label = "分析結果" if has_analysis else "グラフ一覧"
         st.header(mode_label)
@@ -2721,6 +2721,47 @@ if has_analysis or has_charts:
             disabled=trend_btn_disabled,
             help="チャート取得済みの銘柄を数値分析+Vision AIで上昇トレンド判定します",
         )
+    with col_csv:
+        st.write("")
+        trend_ranking_now = st.session_state.get("trend_ranking", [])
+        strong_up_list = [
+            item for item in trend_ranking_now
+            if item.get("overall") == "強い上昇"
+        ]
+        csv_btn_disabled = not bool(strong_up_list)
+        if not csv_btn_disabled:
+            import io as _io, csv as _csv, datetime as _dt
+            market_now = st.session_state.get("market", "jp")
+            csv_buf = _io.StringIO()
+            writer = _csv.writer(csv_buf)
+            # 1行目: メタ情報（添付CSVと同一フォーマット）
+            writer.writerow([
+                "# トレンド銘柄（強い上昇）",
+                f"保存日時:{_dt.datetime.now().strftime('%Y/%m/%d %H:%M')}",
+                f"市場:{market_now}",
+            ])
+            # 2行目: ヘッダー
+            writer.writerow(["code", "name"])
+            # データ行
+            for item in strong_up_list:
+                writer.writerow([item["code"], item["name"]])
+            csv_bytes = csv_buf.getvalue().encode("utf-8-sig")
+            csv_filename = f"トレンド銘柄_{_dt.date.today().strftime('%Y%m%d')}.csv"
+            st.download_button(
+                label="📊 トレンド銘柄CSV",
+                data=csv_bytes,
+                file_name=csv_filename,
+                mime="text/csv",
+                use_container_width=True,
+                help=f"「強い上昇」{len(strong_up_list)}社をCSVで保存",
+            )
+        else:
+            st.button(
+                "📊 トレンド銘柄CSV",
+                use_container_width=True,
+                disabled=True,
+                help="「AIトレンド判定」を実行後に有効になります",
+            )
     with col_pdf:
         st.write("")
         with st.spinner("PDF生成中..."):
