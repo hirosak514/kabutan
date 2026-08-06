@@ -189,6 +189,8 @@ if "trend_ranking" not in st.session_state:
     st.session_state.trend_ranking = []         # AIトレンド判定結果
 if "trend_sort_active" not in st.session_state:
     st.session_state.trend_sort_active = False  # トレンドソート有効フラグ
+if "price_targets" not in st.session_state:
+    st.session_state.price_targets = {}         # 強い上昇銘柄の株価・目標株価情報
 if "market" not in st.session_state:
     st.session_state.market = "jp"   # "jp" または "us"
 
@@ -958,11 +960,13 @@ def _get_ipa_font_path() -> str:
     return None
 
 
-def generate_analysis_pdf(companies, analysis, charts, daily_series=None) -> bytes:
+def generate_analysis_pdf(companies, analysis, charts, daily_series=None,
+                           trend_ranking=None) -> bytes:
     """
     分析結果（直近7営業日テーブル＋テキスト5項目＋日足・週足・月足チャート）を
     A4縦のPDFにまとめてバイト列で返す。
-    会社ごとにセクションを区切り、縦スクロールと同じ順序で配置。
+    trend_rankingが渡された場合はランキング表を冒頭に追加し、
+    各社セクションにもトレンド判定情報を挿入する。
     """
     import io
     from reportlab.lib.pagesizes import A4
@@ -1035,10 +1039,59 @@ def generate_analysis_pdf(companies, analysis, charts, daily_series=None) -> byt
     today_str = datetime.date.today().strftime("%Y年%m月%d日")
 
     story = []
-    story.append(Paragraph("株探 銘柄探検 分析レポート", s_title))
+    has_trend = bool(trend_ranking)
+    trend_map = {item["code"]: item for item in (trend_ranking or [])}
+    title_suffix = "（AIトレンド判定付き）" if has_trend else ""
+    story.append(Paragraph(f"株探 銘柄探検 分析レポート{title_suffix}", s_title))
     story.append(Paragraph(f"作成日: {today_str}　　銘柄数: {len(companies)}社", s_header))
     story.append(HRFlowable(width="100%", thickness=1.5,
                              color=colors.HexColor("#1a237e"), spaceAfter=8))
+
+    # ── AIトレンド判定ランキング表（冒頭） ──
+    if has_trend:
+        story.append(Paragraph("📊 AIトレンド判定ランキング", s_label))
+        story.append(Paragraph(
+            "数値スコア（MA・価格動向）でまず絞り込み、上位銘柄をVision AIが詳細判定。",
+            s_header
+        ))
+        story.append(Spacer(1, 2*mm))
+
+        rank_data = [["順位", "銘柄名（コード）", "総合判定", "日足", "週足", "月足", "確信度"]]
+        overall_order = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
+        for rank_i, item in enumerate(trend_ranking, 1):
+            icon, _ = TREND_LABELS.get(item["overall"], ("⚪", 3))
+            d = item["details"]
+            rank_data.append([
+                str(rank_i),
+                f"{item['name']}（{item['code']}）",
+                f"{icon} {item['overall']}",
+                f"{_score_to_symbol(d['day'])} {item.get('day_trend','')}",
+                f"{_score_to_symbol(d['week'])} {item.get('week_trend','')}",
+                f"{_score_to_symbol(d['month'])} {item.get('month_trend','')}",
+                "★" * item["confidence"] + "☆" * (5 - item["confidence"]),
+            ])
+
+        rank_tbl = Table(
+            rank_data,
+            colWidths=[12*mm, 55*mm, 28*mm, 22*mm, 22*mm, 22*mm, 22*mm],
+            hAlign="LEFT",
+        )
+        rank_tbl.setStyle(TableStyle([
+            ("BACKGROUND",   (0, 0), (-1, 0),  colors.HexColor("#1a237e")),
+            ("TEXTCOLOR",    (0, 0), (-1, 0),  colors.white),
+            ("FONTNAME",     (0, 0), (-1, -1), font_name),
+            ("FONTSIZE",     (0, 0), (-1, -1), 8),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+             [colors.HexColor("#f5f5f5"), colors.white]),
+            ("ALIGN",        (0, 0), (0, -1),  "CENTER"),
+            ("ALIGN",        (2, 0), (-1, -1), "CENTER"),
+            ("GRID",         (0, 0), (-1, -1), 0.3, colors.HexColor("#bdbdbd")),
+            ("TOPPADDING",   (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING",(0, 0), (-1, -1), 2),
+        ]))
+        story.append(rank_tbl)
+        story.append(Spacer(1, 6*mm))
+        story.append(PageBreak())
 
     page_w = A4[0] - 30 * mm  # 利用可能な幅
 
@@ -1047,10 +1100,47 @@ def generate_analysis_pdf(companies, analysis, charts, daily_series=None) -> byt
         if code not in analysis and code not in (charts or {}):
             continue
 
-        # 会社名ヘッダー
-        story.append(Paragraph(f"{name}（{code}）", s_title))
+        # 会社名ヘッダー（ランキング順位付き）
+        rank_prefix = ""
+        trend_item  = trend_map.get(code)
+        if has_trend and trend_item:
+            rank_pos = next((j for j, t in enumerate(trend_ranking, 1)
+                             if t["code"] == code), None)
+            if rank_pos:
+                icon, _ = TREND_LABELS.get(trend_item["overall"], ("⚪", 3))
+                rank_prefix = f"[{rank_pos}位 {icon} {trend_item['overall']}] "
+        story.append(Paragraph(f"{rank_prefix}{name}（{code}）", s_title))
         story.append(HRFlowable(width="100%", thickness=0.5,
                                  color=colors.HexColor("#90caf9"), spaceAfter=4))
+
+        # トレンド判定サマリー（判定済みの場合）
+        if has_trend and trend_item:
+            d = trend_item["details"]
+            conf_str = "★" * trend_item["confidence"] + "☆" * (5 - trend_item["confidence"])
+            trend_summary = (
+                f"【AIトレンド判定】 "
+                f"日足: {_score_to_symbol(d['day'])}{trend_item.get('day_trend','')}　"
+                f"週足: {_score_to_symbol(d['week'])}{trend_item.get('week_trend','')}　"
+                f"月足: {_score_to_symbol(d['month'])}{trend_item.get('month_trend','')}　"
+                f"確信度: {conf_str}"
+            )
+            if trend_item.get("comment"):
+                trend_summary += f"　コメント: {trend_item['comment']}"
+            story.append(Paragraph(trend_summary, s_header))
+            story.append(Spacer(1, 2*mm))
+
+            # 価格情報（「強い上昇」銘柄のみ）
+            if trend_item.get("overall") == "強い上昇":
+                pt = (daily_series or {}).get(f"__price_target_{code}")
+                # price_targetsはdaily_seriesではなく別途渡す必要があるため
+                # companies内にprice_target_keyとして埋め込む
+                pt = company.get("_price_target")
+                if pt:
+                    is_jp_pt = len(str(code)) == 4 and code.isdigit()
+                    price_str = format_price_target_str(pt, is_jp=is_jp_pt)
+                    if price_str:
+                        story.append(Paragraph(f"【価格情報】 {price_str}", s_label))
+                        story.append(Spacer(1, 2*mm))
 
         # 直近7営業日の株価・出来高テーブル
         ds = (daily_series or {}).get(code, [])
@@ -1372,6 +1462,192 @@ def judge_trend_vision(
         return None
 
 
+
+# ----------------------------------------------------------------------
+# 価格・アナリスト目標株価の取得
+# ----------------------------------------------------------------------
+def fetch_price_target_yfinance(code: str, market: str) -> dict:
+    """
+    yfinanceからアナリスト目標株価を取得する。
+    戻り値: {"target_mean": ..., "target_low": ..., "target_high": ...,
+             "analyst_count": ...}
+    """
+    import yfinance as yf
+    symbol = (f"{code}.T"
+              if (market == "jp" and not re.fullmatch(r"[A-Z]{1,6}", code.upper()))
+              else code.upper())
+    try:
+        info = yf.Ticker(symbol).info
+        return {
+            "target_mean":    info.get("targetMeanPrice"),
+            "target_low":     info.get("targetLowPrice"),
+            "target_high":    info.get("targetHighPrice"),
+            "analyst_count":  info.get("numberOfAnalystOpinions"),
+        }
+    except Exception:
+        return {}
+
+
+def fetch_price_target_minkabu(
+    code: str, name: str,
+    api_choice: str,
+    claude_api_key: str = "", grok_api_key: str = "", gemini_api_key: str = "",
+) -> dict:
+    """
+    AIのWeb検索でminkabu.jpの予想株価を取得するフォールバック。
+    戻り値: {"target_mean": ..., "target_low": ..., "target_high": ...}
+    """
+    import anthropic as _anth
+
+    prompt = (
+        f"minkabu.jp で証券コード {code}（{name}）の"
+        "「みんかぶ予想株価」または「みんかぶAI理論株価」を検索してください。\n"
+        "出力は以下のJSONのみで（前後に説明文不要）：\n"
+        '{"target_mean": 数値またはnull, '
+        '"target_low": 数値またはnull, '
+        '"target_high": 数値またはnull}'
+    )
+
+    def _parse(text: str) -> dict:
+        text = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                pass
+        return {}
+
+    try:
+        if api_choice == "Claude API（推奨）":
+            tools = [{"type": "web_search_20250305", "name": "web_search"}]
+            messages = [{"role": "user", "content": prompt}]
+            client = _anth.Anthropic(api_key=claude_api_key)
+            while True:
+                resp = client.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=500,
+                    tools=tools, messages=messages,
+                )
+                messages.append({"role": "assistant", "content": resp.content})
+                if resp.stop_reason == "end_turn":
+                    break
+                tr = [{"type": "tool_result", "tool_use_id": b.id, "content": ""}
+                      for b in resp.content if b.type == "tool_use"]
+                if tr:
+                    messages.append({"role": "user", "content": tr})
+                else:
+                    break
+            text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+            return _parse(text)
+
+        elif api_choice == "Grok API":
+            from openai import OpenAI as _OAI
+            resp = _OAI(api_key=grok_api_key,
+                        base_url="https://api.x.ai/v1").responses.create(
+                model="grok-4.3",
+                input=[{"role": "user", "content": prompt}],
+                tools=[{"type": "web_search"}],
+            )
+            return _parse(resp.output_text)
+
+        else:  # Gemini
+            import google.generativeai as _genai
+            _genai.configure(api_key=gemini_api_key)
+            search_tool = _genai.protos.Tool(
+                google_search=_genai.protos.GoogleSearch()
+            )
+            resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
+                prompt, tools=[search_tool]
+            )
+            return _parse(resp.text)
+    except Exception:
+        return {}
+
+
+def get_price_target(
+    code: str, name: str, market: str, current_price: float,
+    api_choice: str,
+    claude_api_key: str = "", grok_api_key: str = "", gemini_api_key: str = "",
+) -> dict:
+    """
+    アナリスト目標株価と乖離率をまとめて返す。
+    yfinanceで取得できなければAI+みんかぶで補完。
+    戻り値: {"current": ..., "target_mean": ..., "target_low": ...,
+             "target_high": ..., "divergence": ..., "source": ...}
+    """
+    result = {
+        "current":    current_price,
+        "target_mean": None, "target_low": None, "target_high": None,
+        "divergence": None, "source": "なし",
+    }
+
+    # ① yfinanceから試みる
+    yf_data = fetch_price_target_yfinance(code, market)
+    if yf_data.get("target_mean"):
+        result.update({
+            "target_mean":  yf_data["target_mean"],
+            "target_low":   yf_data.get("target_low"),
+            "target_high":  yf_data.get("target_high"),
+            "source": f"アナリスト予想（{yf_data.get('analyst_count','?')}名）",
+        })
+
+    # ② 取得できなければみんかぶをAIで検索
+    if not result["target_mean"] and (claude_api_key or grok_api_key or gemini_api_key):
+        mk_data = fetch_price_target_minkabu(
+            code, name, api_choice,
+            claude_api_key, grok_api_key, gemini_api_key,
+        )
+        if mk_data.get("target_mean"):
+            result.update({
+                "target_mean":  mk_data["target_mean"],
+                "target_low":   mk_data.get("target_low"),
+                "target_high":  mk_data.get("target_high"),
+                "source": "みんかぶ予想",
+            })
+
+    # ③ 乖離率計算（プラス=割安、マイナス=割高）
+    if result["target_mean"] and current_price and current_price > 0:
+        div = (result["target_mean"] - current_price) / current_price * 100
+        result["divergence"] = div
+
+    return result
+
+
+def format_price_target_str(pt: dict, is_jp: bool) -> str:
+    """価格情報を表示用文字列に整形する"""
+    unit = "円" if is_jp else "$"
+    cur = pt.get("current")
+    tmean = pt.get("target_mean")
+    tlow  = pt.get("target_low")
+    thigh = pt.get("target_high")
+    div   = pt.get("divergence")
+    src   = pt.get("source", "")
+
+    if cur is None:
+        return ""
+    if is_jp:
+        cur_str = f"{cur:,.0f}{unit}"
+    else:
+        cur_str = f"{cur:.2f}{unit}"
+
+    parts = [f"現在株価：{cur_str}"]
+    if tmean:
+        if is_jp:
+            if tlow and thigh and tlow != thigh:
+                parts.append(f"目標株価（{src}）：{tlow:,.0f}〜{thigh:,.0f}{unit}")
+            else:
+                parts.append(f"目標株価（{src}）：{tmean:,.0f}{unit}")
+        else:
+            if tlow and thigh and tlow != thigh:
+                parts.append(f"目標株価（{src}）：{tlow:.2f}〜{thigh:.2f}{unit}")
+            else:
+                parts.append(f"目標株価（{src}）：{tmean:.2f}{unit}")
+        if div is not None:
+            sign = "+" if div >= 0 else ""
+            parts.append(f"（乖離率 {sign}{div:.1f}%）")
+    return "　　".join(parts)
+
+
 # ----------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------
@@ -1486,6 +1762,7 @@ if update_clicked:
     st.session_state.surge_top20_codes = set()
     st.session_state.trend_ranking = []
     st.session_state.trend_sort_active = False
+    st.session_state.price_targets = {}
     if "company_editor" in st.session_state:
         del st.session_state["company_editor"]
     if companies:
@@ -2448,11 +2725,22 @@ if has_analysis or has_charts:
         st.write("")
         with st.spinner("PDF生成中..."):
             try:
+                # 価格情報をcompanyデータに添付してPDFへ渡す
+                price_targets = st.session_state.get("price_targets", {})
+                companies_with_pt = []
+                for c in display_companies:
+                    c_copy = dict(c)
+                    pt = price_targets.get(c["code"])
+                    if pt:
+                        c_copy["_price_target"] = pt
+                    companies_with_pt.append(c_copy)
+
                 pdf_bytes = generate_analysis_pdf(
-                    display_companies,
+                    companies_with_pt,
                     st.session_state.analysis,
                     st.session_state.charts,
                     daily_series=st.session_state.daily_series,
+                    trend_ranking=st.session_state.get("trend_ranking") or None,
                 )
                 import datetime
                 suffix = "分析" if has_analysis else "グラフ"
@@ -2560,6 +2848,34 @@ if has_analysis or has_charts:
             )
             st.session_state.trend_ranking  = trend_ranking
             st.session_state.trend_sort_active = True
+
+            # 「強い上昇」銘柄の価格・目標株価を自動取得
+            strong_up = [item for item in trend_ranking if item["overall"] == "強い上昇"]
+            if strong_up:
+                p_progress = st.progress(0.0, text="「強い上昇」銘柄の目標株価を取得中...")
+                market_now = st.session_state.get("market", "jp")
+                for pi, item in enumerate(strong_up):
+                    code = item["code"]
+                    name = item["name"]
+                    # 現在株価は取得済みの日足データ最終値を使用
+                    ds = st.session_state.daily_series.get(code, [])
+                    current_price = ds[-1]["close"] if ds else None
+                    is_jp = (market_now == "jp" and
+                             not re.fullmatch(r"[A-Z]{1,6}", code.upper()))
+                    pt = get_price_target(
+                        code, name, market_now, current_price,
+                        api_choice=api_choice,
+                        claude_api_key=claude_api_key,
+                        grok_api_key=grok_api_key,
+                        gemini_api_key=gemini_api_key,
+                    )
+                    st.session_state.price_targets[code] = pt
+                    p_progress.progress(
+                        (pi + 1) / len(strong_up),
+                        text=f"目標株価取得中... ({pi+1}/{len(strong_up)}) {name}",
+                    )
+                p_progress.empty()
+
             st.success("AIトレンド判定が完了しました。グラフの表示順をランキング順に変更しました。")
 
     # ── トレンドランキング表の表示 ──
@@ -2617,6 +2933,25 @@ if has_analysis or has_charts:
         market = st.session_state.get("market", "jp")
 
         st.subheader(f"{name}（{code}）")
+
+        # ── 「強い上昇」銘柄：現在株価・目標株価・乖離率を表示 ──
+        pt = st.session_state.price_targets.get(code)
+        trend_item_for_price = next(
+            (t for t in st.session_state.get("trend_ranking", []) if t["code"] == code),
+            None
+        )
+        if pt and trend_item_for_price and trend_item_for_price.get("overall") == "強い上昇":
+            is_jp_code = (market == "jp" and
+                          not re.fullmatch(r"[A-Z]{1,6}", code.upper()))
+            price_str = format_price_target_str(pt, is_jp=is_jp_code)
+            if price_str:
+                div = pt.get("divergence")
+                color = "#d32f2f" if (div is not None and div < 0) else "#1565c0"
+                st.markdown(
+                    f'<span style="color:{color}; font-size:1.0em; font-weight:600;">'
+                    f'{price_str}</span>',
+                    unsafe_allow_html=True,
+                )
 
         # ── 急騰モード時：メトリクス（急騰率・ランキング順位）を表示 ──
         surge_ranking = st.session_state.get("surge_ranking", [])
