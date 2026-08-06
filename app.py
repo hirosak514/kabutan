@@ -1746,6 +1746,18 @@ with st.sidebar:
         chart_only_clicked = st.button("📊 グラフのみ", use_container_width=True,
                                        help="APIキー不要。チャートデータの取得と描画のみ行います。")
 
+    # APIキーが入力されているときのみ有効な全自動ボタン
+    active_key_for_auto = claude_api_key or grok_api_key or gemini_api_key
+    auto_trend_clicked = st.button(
+        "🚀 AIトレンド判定まで自動で行う",
+        use_container_width=True,
+        disabled=not bool(active_key_for_auto),
+        help=(
+            "「グラフのみ」→「AIトレンド判定」を1クリックで実行します。\n"
+            "APIキーが入力されている場合に有効になります。"
+        ),
+    )
+
 # ---- 更新ボタン処理 ----
 if update_clicked:
     market = detect_market(url_input)
@@ -2664,6 +2676,145 @@ if chart_only_clicked:
             )
         progress.empty()
         st.success("チャートの取得が完了しました。下にスクロールして確認してください。")
+
+# ---- AIトレンド判定まで自動で行うボタン処理 ----
+if auto_trend_clicked:
+    if not st.session_state.companies:
+        st.warning("先に「更新」ボタンまたは手動入力で銘柄リストを取得してください。")
+    else:
+        # ── STEP 1: グラフのみと同じ処理（チャート取得）──
+        selected = st.session_state.get(
+            "selected_codes",
+            {c["code"] for c in st.session_state.companies[:analyze_count]}
+        )
+        target_companies_auto = [
+            c for c in st.session_state.companies[:analyze_count]
+            if c["code"] in selected
+        ]
+        total_auto = len(target_companies_auto)
+        prog1 = st.progress(0.0, text="STEP 1/2 チャートデータを取得中...")
+        for i, company in enumerate(target_companies_auto):
+            code, name = company["code"], company["name"]
+            if code not in st.session_state.charts:
+                charts_r, daily_r = fetch_chart_images(
+                    code, name, market=st.session_state.get("market", "jp")
+                )
+                st.session_state.charts[code] = charts_r
+                st.session_state.daily_series[code] = daily_r
+            prog1.progress(
+                (i + 1) / total_auto,
+                text=f"STEP 1/2 チャート取得中... ({i+1}/{total_auto}) {name}"
+            )
+        prog1.empty()
+
+        # ── STEP 2: AIトレンド判定と同じ処理 ──
+        # 数値スコアリング
+        num_scores_auto = {}
+        for c in target_companies_auto:
+            code = c["code"]
+            sd = st.session_state.daily_series.get(code, [])
+            sw_a, sm_a = [], []
+            for tf_key in ("week", "month"):
+                data = st.session_state.get(f"series_{tf_key}_{code}", [])
+                if not data and st.session_state.charts.get(code):
+                    try:
+                        data = fetch_series_from_yfinance(
+                            code, st.session_state.get("market", "jp"), tf_key
+                        )
+                        st.session_state[f"series_{tf_key}_{code}"] = data
+                    except Exception:
+                        data = []
+                if tf_key == "week":
+                    sw_a = data
+                else:
+                    sm_a = data
+            score, details = calc_trend_score(sd, sw_a, sm_a)
+            num_scores_auto[code] = {"score": score, "details": details, "company": c}
+
+        # Vision AI判定
+        sorted_by_num_auto = sorted(
+            num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
+        )
+        vision_threshold_auto = max(3, len(sorted_by_num_auto) // 2)
+        vision_targets_auto = sorted_by_num_auto[:vision_threshold_auto]
+
+        prog2 = st.progress(0.0, text="STEP 2/2 Vision AIでトレンドを判定中...")
+        vision_results_auto = {}
+        for i, (code, info) in enumerate(vision_targets_auto):
+            name = info["company"]["name"]
+            result = judge_trend_vision(
+                code, name, st.session_state.charts.get(code, {}),
+                api_choice=api_choice,
+                claude_api_key=claude_api_key,
+                grok_api_key=grok_api_key,
+                gemini_api_key=gemini_api_key,
+            )
+            vision_results_auto[code] = result
+            prog2.progress(
+                (i + 1) / len(vision_targets_auto),
+                text=f"STEP 2/2 Vision判定中... ({i+1}/{len(vision_targets_auto)}) {name}"
+            )
+        prog2.empty()
+
+        # 統合・ランキング化
+        overall_order_auto = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
+        trend_ranking_auto = []
+        for code, info in num_scores_auto.items():
+            vr = vision_results_auto.get(code)
+            overall = vr["overall"] if vr else (
+                "上昇" if info["score"] >= 5 else
+                "横ばい" if info["score"] >= 3 else "下降"
+            )
+            trend_ranking_auto.append({
+                "code":        code,
+                "name":        info["company"]["name"],
+                "num_score":   info["score"],
+                "details":     info["details"],
+                "overall":     overall,
+                "confidence":  vr.get("confidence", 3) if vr else info["score"],
+                "comment":     vr.get("comment", "") if vr else "",
+                "day_trend":   vr.get("day_trend",   "") if vr else "",
+                "week_trend":  vr.get("week_trend",  "") if vr else "",
+                "month_trend": vr.get("month_trend", "") if vr else "",
+            })
+        trend_ranking_auto.sort(
+            key=lambda x: (
+                overall_order_auto.get(x["overall"], 0),
+                x["confidence"], x["num_score"],
+            ),
+            reverse=True,
+        )
+        st.session_state.trend_ranking  = trend_ranking_auto
+        st.session_state.trend_sort_active = True
+
+        # 強い上昇銘柄の価格情報を取得
+        strong_up_auto = [t for t in trend_ranking_auto if t["overall"] == "強い上昇"]
+        if strong_up_auto:
+            market_now_auto = st.session_state.get("market", "jp")
+            prog3 = st.progress(0.0, text="「強い上昇」銘柄の目標株価を取得中...")
+            for pi, item in enumerate(strong_up_auto):
+                code = item["code"]
+                ds = st.session_state.daily_series.get(code, [])
+                current_price = ds[-1]["close"] if ds else None
+                pt = get_price_target(
+                    code, item["name"], market_now_auto, current_price,
+                    api_choice=api_choice,
+                    claude_api_key=claude_api_key,
+                    grok_api_key=grok_api_key,
+                    gemini_api_key=gemini_api_key,
+                )
+                st.session_state.price_targets[code] = pt
+                prog3.progress(
+                    (pi + 1) / len(strong_up_auto),
+                    text=f"目標株価取得中... ({pi+1}/{len(strong_up_auto)}) {item['name']}",
+                )
+            prog3.empty()
+
+        strong_count = len(strong_up_auto)
+        st.success(
+            f"完了。{total_auto}社を分析し、「強い上昇」は{strong_count}社でした。"
+            f"グラフはランキング順に並び替えられています。"
+        )
 
 # ----------------------------------------------------------------------
 # 結果表示（縦スクロールで全銘柄）
