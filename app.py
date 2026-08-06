@@ -107,23 +107,61 @@ NIKKEI225_STOCKS = [
     ("9983","ファーストリテイリング"),("9984","ソフトバンクグループ"),
 ]
 
-# NYダウ30構成銘柄（米国株急騰モードのフォールバック用）
+# 米国株急騰モード・ニュース検索のデフォルト対象（S&P500主要100社 + NASDAQ主要銘柄）
 DOW30_STOCKS = [
+    # ダウ30
     ("AAPL","Apple"),("AMGN","Amgen"),("AXP","American Express"),
     ("BA","Boeing"),("CAT","Caterpillar"),("CRM","Salesforce"),
     ("CSCO","Cisco"),("CVX","Chevron"),("DIS","Disney"),
     ("DOW","Dow"),("GS","Goldman Sachs"),("HD","Home Depot"),
-    ("HON","Honeywell"),("IBM","IBM"),("INTC","Intel"),
-    ("JNJ","Johnson & Johnson"),("JPM","JPMorgan Chase"),("KO","Coca-Cola"),
-    ("MCD","McDonald's"),("MMM","3M"),("MRK","Merck"),
-    ("MSFT","Microsoft"),("NKE","Nike"),("PG","Procter & Gamble"),
-    ("TRV","Travelers"),("UNH","UnitedHealth"),("V","Visa"),
-    ("VZ","Verizon"),("WBA","Walgreens Boots"),("WMT","Walmart"),
-    # NASDAQ100追加主要銘柄
-    ("NVDA","NVIDIA"),("META","Meta"),("GOOGL","Alphabet"),
+    ("HON","Honeywell"),("IBM","IBM"),("JNJ","Johnson & Johnson"),
+    ("JPM","JPMorgan Chase"),("KO","Coca-Cola"),("MCD","McDonald's"),
+    ("MMM","3M"),("MRK","Merck"),("MSFT","Microsoft"),("NKE","Nike"),
+    ("PG","Procter & Gamble"),("TRV","Travelers"),("UNH","UnitedHealth"),
+    ("V","Visa"),("VZ","Verizon"),("WMT","Walmart"),
+    # NASDAQ / テクノロジー
+    ("NVDA","NVIDIA"),("META","Meta"),("GOOGL","Alphabet"),("GOOG","Alphabet C"),
     ("AMZN","Amazon"),("TSLA","Tesla"),("AVGO","Broadcom"),
     ("AMD","AMD"),("QCOM","Qualcomm"),("NFLX","Netflix"),
     ("ADBE","Adobe"),("COST","Costco"),("PEP","PepsiCo"),
+    ("INTC","Intel"),("AMAT","Applied Materials"),("MU","Micron"),
+    ("LRCX","Lam Research"),("KLAC","KLA Corp"),("SNPS","Synopsys"),
+    ("CDNS","Cadence"),("MRVL","Marvell"),("MCHP","Microchip"),
+    ("ON","ON Semiconductor"),("TXN","Texas Instruments"),("ADI","Analog Devices"),
+    ("PANW","Palo Alto"),("CRWD","CrowdStrike"),("FTNT","Fortinet"),
+    ("ORCL","Oracle"),("SAP","SAP"),("NOW","ServiceNow"),
+    ("INTU","Intuit"),("TEAM","Atlassian"),("WDAY","Workday"),
+    ("ZM","Zoom"),("UBER","Uber"),("LYFT","Lyft"),
+    ("ABNB","Airbnb"),("DASH","DoorDash"),("SHOP","Shopify"),
+    # ヘルスケア・製薬
+    ("LLY","Eli Lilly"),("PFE","Pfizer"),("ABBV","AbbVie"),
+    ("TMO","Thermo Fisher"),("DHR","Danaher"),("ABT","Abbott"),
+    ("MDT","Medtronic"),("BMY","Bristol-Myers"),("GILD","Gilead"),
+    ("REGN","Regeneron"),("BIIB","Biogen"),("VRTX","Vertex"),
+    ("MRNA","Moderna"),("ISRG","Intuitive Surgical"),
+    # 金融
+    ("BRK-B","Berkshire Hathaway"),("BAC","Bank of America"),
+    ("WFC","Wells Fargo"),("MS","Morgan Stanley"),("BLK","BlackRock"),
+    ("SPGI","S&P Global"),("MCO","Moody's"),("ICE","ICE"),
+    ("CME","CME Group"),("CB","Chubb"),("PGR","Progressive"),
+    # 一般消費財・小売
+    ("AMZN","Amazon"),("TGT","Target"),("LOW","Lowe's"),
+    ("TJX","TJX Companies"),("BKNG","Booking Holdings"),("MAR","Marriott"),
+    ("HLT","Hilton"),("MO","Altria"),("PM","Philip Morris"),
+    # エネルギー・素材
+    ("XOM","ExxonMobil"),("COP","ConocoPhillips"),("SLB","Schlumberger"),
+    ("LIN","Linde"),("APD","Air Products"),("ECL","Ecolab"),
+    ("NEM","Newmont"),("FCX","Freeport-McMoRan"),
+    # 通信・公益
+    ("T","AT&T"),("TMUS","T-Mobile"),("NEE","NextEra Energy"),
+    ("DUK","Duke Energy"),("SO","Southern Company"),
+    # 不動産・インフラ
+    ("PLD","Prologis"),("AMT","American Tower"),("EQIX","Equinix"),
+    ("CCI","Crown Castle"),("PSA","Public Storage"),
+    # その他注目銘柄
+    ("COIN","Coinbase"),("SQ","Block"),("PYPL","PayPal"),
+    ("SOFI","SoFi"),("HOOD","Robinhood"),("PLTR","Palantir"),
+    ("ARM","Arm Holdings"),("SMCI","Super Micro"),
 ]
 HEADERS = {
     # ブラウザに近い完全なヘッダーセットでbot検知を回避する
@@ -2129,99 +2167,128 @@ def get_upcoming_events_ai(
 ) -> list:
     """
     AIのWeb検索を使って今後N日間の重要企業イベント銘柄を取得する。
-    決算以外のM&A・新製品・ガイダンス修正なども対象。
+    米国株は英語プロンプト（EarningsWhispers等を指定）、日本株は日本語プロンプトで
+    それぞれ独立して検索することで精度を向上させる。
     """
     from datetime import date, timedelta
     import anthropic as _anthropic
 
     today    = date.today()
     deadline = today + timedelta(days=days)
-    today_s  = today.strftime("%Y年%m月%d日")
-    dead_s   = deadline.strftime("%Y年%m月%d日")
+    today_en = today.strftime("%B %d, %Y")
+    dead_en  = deadline.strftime("%B %d, %Y")
+    today_jp = today.strftime("%Y年%m月%d日")
+    dead_jp  = deadline.strftime("%Y年%m月%d日")
+    date_ex  = today.strftime("%Y/%m/%d")
 
-    target_str = {
-        "jp":   "日本株（東証上場企業）",
-        "us":   "米国株（NYSE・NASDAQ上場企業）",
-        "both": "日本株（東証）・米国株（NYSE/NASDAQ）の両方",
-    }[target]
+    # 米国株向け英語プロンプト（決算カレンダー専門サイトを明示）
+    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {today_en} and {dead_en}.
 
-    prompt = f"""本日は{today_s}です。
-{today_s}から{dead_s}までの間に、{target_str}の企業で
-以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
-Web検索して調べ、できるだけ多くリストアップしてください：
+Search these sources specifically:
+1. EarningsWhispers (earningswhispers.com) earnings calendar
+2. Yahoo Finance earnings calendar (finance.yahoo.com/calendar/earnings)
+3. Nasdaq earnings calendar (nasdaq.com/market-activity/earnings)
+4. Seeking Alpha earnings calendar
+5. MarketWatch earnings calendar
 
-- 決算発表・四半期決算・通期決算
-- 業績予想・ガイダンスの修正・上方修正・下方修正
-- M&A・合併・買収・資本業務提携の発表
-- 新製品・新サービス・新技術の発表
-- 重要な規制当局の承認・却下・ヒアリング
-- 株主総会・取締役会の重要決議
-- その他、株価に大きく影響しうるコーポレートイベント
+Event types to find:
+- Quarterly/annual earnings releases and revenue reports
+- EPS/revenue guidance updates (raised or lowered)
+- M&A announcements, mergers, spin-offs, acquisitions
+- Major new product launches or partnerships
+- FDA approvals/Complete Response Letters (biotech/pharma)
+- Investor Day / Analyst Day events
+- Share buyback announcements or special dividends
+- Major regulatory decisions
 
-出力は必ず以下のJSON形式のみで返してください
-（前後に説明文・コードブロック記号不要）：
-{{"events": [
-  {{"code": "7203", "name": "トヨタ自動車", "market": "jp",
-    "event": "2026年3月期通期決算発表", "date": "{today.strftime('%Y/%m/%d')}"}},
-  {{"code": "AAPL", "name": "Apple Inc.", "market": "us",
-    "event": "Q3決算発表", "date": "{today.strftime('%Y/%m/%d')}"}}
+Return ONLY this JSON (no explanation, no markdown):
+{{"us_events": [
+  {{"code": "NVDA", "name": "NVIDIA Corp", "event": "Q2 FY2026 Earnings Release", "date": "{date_ex}"}},
+  {{"code": "AAPL", "name": "Apple Inc.", "event": "Q3 2026 Earnings Report", "date": "{date_ex}"}}
 ]}}"""
 
-    text = ""
-    try:
-        if api_choice == "Claude API（推奨）":
-            client = _anthropic.Anthropic(api_key=claude_api_key)
-            tools = [{"type": "web_search_20250305", "name": "web_search"}]
-            messages = [{"role": "user", "content": prompt}]
-            while True:
-                resp = client.messages.create(
-                    model="claude-sonnet-4-6", max_tokens=3000,
-                    tools=tools, messages=messages,
+    # 日本株向け日本語プロンプト
+    jp_prompt = f"""本日は{today_jp}です。
+{today_jp}から{dead_jp}までの間に、日本株（東証上場企業）で
+以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
+Web検索して調べ、できるだけ多くリストアップしてください：
+- 決算発表・四半期決算・通期決算
+- 業績予想・ガイダンスの修正・上方修正・下方修正
+- M&A・合併・買収・資本業務提携
+- 新製品・新サービスの発表
+- 重要な規制当局の承認・却下
+
+出力は必ず以下のJSON形式のみ（前後に説明文不要）：
+{{"jp_events": [
+  {{"code": "7203", "name": "トヨタ自動車", "event": "通期決算発表", "date": "{date_ex}"}}
+]}}"""
+
+    def _call_ai(prompt_text: str) -> str:
+        if not prompt_text:
+            return ""
+        try:
+            if api_choice == "Claude API（推奨）":
+                client = _anthropic.Anthropic(api_key=claude_api_key)
+                tools = [{"type": "web_search_20250305", "name": "web_search"}]
+                messages = [{"role": "user", "content": prompt_text}]
+                while True:
+                    resp = client.messages.create(
+                        model="claude-sonnet-4-6", max_tokens=3000,
+                        tools=tools, messages=messages,
+                    )
+                    messages.append({"role": "assistant", "content": resp.content})
+                    if resp.stop_reason == "end_turn":
+                        break
+                    tr = [{"type": "tool_result", "tool_use_id": b.id, "content": ""}
+                          for b in resp.content if b.type == "tool_use"]
+                    if tr:
+                        messages.append({"role": "user", "content": tr})
+                    else:
+                        break
+                return "".join(b.text for b in resp.content if hasattr(b, "text"))
+            elif api_choice == "Grok API":
+                from openai import OpenAI as _OAI
+                resp = _OAI(api_key=grok_api_key,
+                            base_url="https://api.x.ai/v1").responses.create(
+                    model="grok-4.3",
+                    input=[{"role": "user", "content": prompt_text}],
+                    tools=[{"type": "web_search"}],
                 )
-                messages.append({"role": "assistant", "content": resp.content})
-                if resp.stop_reason == "end_turn":
-                    break
-                tool_results = [
-                    {"type": "tool_result", "tool_use_id": b.id, "content": ""}
-                    for b in resp.content if b.type == "tool_use"
-                ]
-                if tool_results:
-                    messages.append({"role": "user", "content": tool_results})
-                else:
-                    break
-            text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+                return resp.output_text
+            else:
+                import google.generativeai as _genai
+                _genai.configure(api_key=gemini_api_key)
+                search_tool = _genai.protos.Tool(
+                    google_search=_genai.protos.GoogleSearch()
+                )
+                resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
+                    prompt_text, tools=[search_tool]
+                )
+                return resp.text
+        except Exception:
+            return ""
 
-        elif api_choice == "Grok API":
-            from openai import OpenAI as _OAI
-            client = _OAI(api_key=grok_api_key, base_url="https://api.x.ai/v1")
-            resp = client.responses.create(
-                model="grok-4.3", input=[{"role": "user", "content": prompt}],
-                tools=[{"type": "web_search"}],
-            )
-            text = resp.output_text
+    def _parse(text: str, market: str, key: str) -> list:
+        text = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return []
+        try:
+            data = json.loads(m.group(0))
+            events = data.get(key) or data.get("events") or []
+            for ev in events:
+                ev.setdefault("market", market)
+            return events
+        except Exception:
+            return []
 
-        else:  # Gemini
-            import google.generativeai as _genai
-            _genai.configure(api_key=gemini_api_key)
-            model = _genai.GenerativeModel("gemini-2.5-flash")
-            search_tool = _genai.protos.Tool(
-                google_search=_genai.protos.GoogleSearch()
-            )
-            resp = model.generate_content(prompt, tools=[search_tool])
-            text = resp.text
-    except Exception as e:
-        return []
+    all_events = []
+    if target in ("us", "both"):
+        all_events.extend(_parse(_call_ai(us_prompt), "us", "us_events"))
+    if target in ("jp", "both"):
+        all_events.extend(_parse(_call_ai(jp_prompt), "jp", "jp_events"))
+    return all_events
 
-    # JSON解析
-    text = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-        return data.get("events", [])
-    except Exception:
-        return []
 
 
 def merge_news_results(yf_results: list, ai_results: list) -> list:
