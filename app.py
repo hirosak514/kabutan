@@ -2109,14 +2109,22 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
 # ----------------------------------------------------------------------
 def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
     """
-    yfinanceの決算カレンダーを使って、今日〜N日後に決算予定の銘柄を返す。
+    yfinanceの決算カレンダーを使って、指定期間内に決算予定の銘柄を返す。
+    days > 0: 今日〜N日後
+    days < 0: N日前〜今日
+    days == 0: 今日のみ
     target: "jp"=日本株のみ / "us"=米国株のみ / "both"=両方
     """
     import yfinance as yf
     from datetime import date, timedelta
 
-    today    = date.today()
-    deadline = today + timedelta(days=days)
+    today = date.today()
+    if days >= 0:
+        start_date = today
+        end_date   = today + timedelta(days=days)
+    else:
+        start_date = today + timedelta(days=days)  # 過去方向（負）
+        end_date   = today
     results  = []
 
     candidates = []
@@ -2131,7 +2139,6 @@ def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
             cal = yf.Ticker(symbol).calendar
             if cal is None:
                 continue
-            # calはdict or DataFrameの場合がある
             earn_dates = []
             if isinstance(cal, dict):
                 raw = cal.get("Earnings Date", [])
@@ -2141,14 +2148,13 @@ def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
                 earn_dates = raw if isinstance(raw, list) else [raw]
 
             for ed in earn_dates:
-                # Timestamp → date に変換
                 if hasattr(ed, "date"):
                     ed = ed.date()
-                if isinstance(ed, date) and today <= ed <= deadline:
+                if isinstance(ed, date) and start_date <= ed <= end_date:
                     results.append({
                         "code":   code,
                         "name":   name,
-                        "event":  "決算発表（予定）",
+                        "event":  "決算発表（予定）" if ed >= today else "決算発表（実績）",
                         "date":   ed.strftime("%Y/%m/%d"),
                         "market": mkt,
                         "source": "yfinance",
@@ -2173,16 +2179,34 @@ def get_upcoming_events_ai(
     from datetime import date, timedelta
     import anthropic as _anthropic
 
-    today    = date.today()
-    deadline = today + timedelta(days=days)
-    today_en = today.strftime("%B %d, %Y")
-    dead_en  = deadline.strftime("%B %d, %Y")
-    today_jp = today.strftime("%Y年%m月%d日")
-    dead_jp  = deadline.strftime("%Y年%m月%d日")
+    today = date.today()
+    # daysが正なら未来方向、負なら過去方向
+    if days >= 0:
+        start_date = today
+        end_date   = today + timedelta(days=days)
+    else:
+        start_date = today + timedelta(days=days)
+        end_date   = today
+
+    start_en = start_date.strftime("%B %d, %Y")
+    end_en   = end_date.strftime("%B %d, %Y")
+    start_jp = start_date.strftime("%Y年%m月%d日")
+    end_jp   = end_date.strftime("%Y年%m月%d日")
     date_ex  = today.strftime("%Y/%m/%d")
 
+    # 過去検索の場合は発表済みイベントを探す旨を追加
+    past_note_en = (
+        "\nNote: Since the search range includes past dates, "
+        "also include events that have ALREADY been announced in this period."
+        if days < 0 else ""
+    )
+    past_note_jp = (
+        "\n※検索期間に過去の日付が含まれるため、すでに発表済みのイベントも含めてください。"
+        if days < 0 else ""
+    )
+
     # 米国株向け英語プロンプト（決算カレンダー専門サイトを明示）
-    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {today_en} and {dead_en}.
+    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {start_en} and {end_en}.{past_note_en}
 
 Search these sources specifically:
 1. EarningsWhispers (earningswhispers.com) earnings calendar
@@ -2208,10 +2232,10 @@ Return ONLY this JSON (no explanation, no markdown):
 ]}}"""
 
     # 日本株向け日本語プロンプト
-    jp_prompt = f"""本日は{today_jp}です。
-{today_jp}から{dead_jp}までの間に、日本株（東証上場企業）で
+    jp_prompt = f"""本日は{today.strftime('%Y年%m月%d日')}です。
+{start_jp}から{end_jp}までの間に、日本株（東証上場企業）で
 以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
-Web検索して調べ、できるだけ多くリストアップしてください：
+Web検索して調べ、できるだけ多くリストアップしてください：{past_note_jp}
 - 決算発表・四半期決算・通期決算
 - 業績予想・ガイダンスの修正・上方修正・下方修正
 - M&A・合併・買収・資本業務提携
@@ -2343,9 +2367,30 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
             )
         with nc2:
             news_days = st.slider(
-                "検索期間（本日からN日後まで）",
-                min_value=1, max_value=7, value=3, key="news_days",
+                "検索範囲（マイナス=過去、プラス=未来、0=本日のみ）",
+                min_value=-7, max_value=7, value=3, step=1, key="news_days",
             )
+
+        # 実際の検索期間を日付で表示
+        from datetime import date as _nd, timedelta as _td
+        _today = _nd.today()
+        if news_days >= 0:
+            _start = _today
+            _end   = _today + _td(days=news_days)
+        else:
+            _start = _today + _td(days=news_days)
+            _end   = _today
+
+        def _dlabel(d):
+            diff = (d - _today).days
+            if diff == 0:   return "本日"
+            elif diff > 0:  return f"{diff}日後"
+            else:           return f"{abs(diff)}日前"
+
+        st.info(
+            f"📅 検索期間：**{_start.strftime('%Y/%m/%d')}**（{_dlabel(_start)}）"
+            f"　〜　**{_end.strftime('%Y/%m/%d')}**（{_dlabel(_end)}）"
+        )
 
         target_map = {
             "日本株・米国株 両方": "both",
