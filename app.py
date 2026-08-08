@@ -2342,10 +2342,28 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 index=0, horizontal=True, key="news_target",
             )
         with nc2:
-            news_days = st.slider(
-                "検索期間（本日からN日後まで）",
-                min_value=1, max_value=7, value=3, key="news_days",
+            news_range = st.slider(
+                "検索範囲（本日=0、過去はマイナス、未来はプラス）",
+                min_value=-7, max_value=7,
+                value=(0, 3),
+                step=1, key="news_range",
             )
+        news_start_days, news_end_days = news_range
+
+        # 実際の検索期間を日付で表示
+        from datetime import date as _nd, timedelta as _td
+        _today = _nd.today()
+        _s = _today + _td(days=news_start_days)
+        _e = _today + _td(days=news_end_days)
+        def _dlabel(d):
+            diff = (d - _today).days
+            if diff == 0:  return "本日"
+            elif diff > 0: return f"{diff}日後"
+            else:          return f"{abs(diff)}日前"
+        st.info(
+            f"📅 検索期間：**{_s.strftime('%Y/%m/%d')}**（{_dlabel(_s)}）"
+            f"　〜　**{_e.strftime('%Y/%m/%d')}**（{_dlabel(_e)}）"
+        )
 
         target_map = {
             "日本株・米国株 両方": "both",
@@ -2355,15 +2373,17 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         target_code = target_map[news_target]
 
         if st.button("📰 重要発表銘柄を検索", use_container_width=False, key="news_search_btn"):
-            with st.spinner("① yfinanceで決算カレンダーを確認中..."):
+            with st.spinner("① yfinanceで決算カレンダーを確認中（calendar + earnings_dates）..."):
                 yf_results = get_upcoming_earnings_yfinance(
-                    days=news_days, target=target_code
+                    start_days=news_start_days, end_days=news_end_days,
+                    target=target_code,
                 )
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
             with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
                 ai_results = get_upcoming_events_ai(
-                    days=news_days, api_choice=api_choice,
+                    start_days=news_start_days, end_days=news_end_days,
+                    api_choice=api_choice,
                     claude_api_key=claude_api_key,
                     grok_api_key=grok_api_key,
                     gemini_api_key=gemini_api_key,
@@ -2404,36 +2424,28 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 use_container_width=True,
                 key="news_editor",
             )
-            btn_col1, btn_col2 = st.columns([2, 1])
-            with btn_col1:
-                if st.button("➕ チェックした銘柄をリストに追加", key="news_add_btn"):
-                    to_add = [
-                        {"code": r["コード"], "name": r["銘柄名"]}
-                        for r in edited_news if r["追加"]
-                    ]
-                    if to_add:
-                        existing = {c["code"] for c in st.session_state.companies}
-                        added = []
-                        for c in to_add:
-                            if c["code"] not in existing:
-                                st.session_state.companies.append(c)
-                                existing.add(c["code"])
-                                added.append(c["name"])
-                        if "company_editor" in st.session_state:
-                            del st.session_state["company_editor"]
-                        st.session_state["news_results"] = []
-                        if added:
-                            st.success(f"追加しました: {', '.join(added)}")
-                        else:
-                            st.info("選択した銘柄はすでにリストに含まれています。")
-                    else:
-                        st.warning("追加する銘柄にチェックを入れてください。")
-            with btn_col2:
-                if st.button("🗑️ 現在のリストを削除", key="news_clear_btn",
-                             type="secondary",
-                             help="取得した銘柄リスト（上の表）を全件クリアします"):
+            if st.button("➕ チェックした銘柄をリストに追加", key="news_add_btn"):
+                to_add = [
+                    {"code": r["コード"], "name": r["銘柄名"]}
+                    for r in edited_news if r["追加"]
+                ]
+                if to_add:
+                    existing = {c["code"] for c in st.session_state.companies}
+                    added = []
+                    for c in to_add:
+                        if c["code"] not in existing:
+                            st.session_state.companies.append(c)
+                            existing.add(c["code"])
+                            added.append(c["name"])
+                    if "company_editor" in st.session_state:
+                        del st.session_state["company_editor"]
                     st.session_state["news_results"] = []
-                    st.rerun()
+                    if added:
+                        st.success(f"追加しました: {', '.join(added)}")
+                    else:
+                        st.info("選択した銘柄はすでにリストに含まれています。")
+                else:
+                    st.warning("追加する銘柄にチェックを入れてください。")
 
 # ----------------------------------------------------------------------
 # 💾 銘柄リストの保存・読み込み
@@ -2562,21 +2574,35 @@ if st.session_state.companies:
         {"選択": True, "コード": c["code"], "銘柄名": c["name"]}
         for c in visible
     ]
-    col_all, col_none, _ = st.columns([1, 1, 6])
+    col_all, col_none, col_clear, _ = st.columns([1, 1, 1.5, 4])
     with col_all:
         if st.button("✅ 全選択", use_container_width=True):
-            # セッションキーを削除してリセット（次レンダリングで全チェック）
             if "company_editor" in st.session_state:
                 del st.session_state["company_editor"]
             st.rerun()
     with col_none:
         if st.button("☐ 全解除", use_container_width=True):
-            # 全解除状態を強制セット
             st.session_state["company_editor"] = {
                 "edited_rows": {i: {"選択": False} for i in range(len(df_rows))},
                 "added_rows": [],
                 "deleted_rows": [],
             }
+            st.rerun()
+    with col_clear:
+        if st.button("🗑️ リストを削除", use_container_width=True,
+                     help="現在の銘柄リストを全件クリアします"):
+            st.session_state.companies = []
+            st.session_state.analysis = {}
+            st.session_state.charts = {}
+            st.session_state.daily_series = {}
+            st.session_state.selected_codes = set()
+            st.session_state.surge_ranking = []
+            st.session_state.surge_top20_codes = set()
+            st.session_state.trend_ranking = []
+            st.session_state.trend_sort_active = False
+            st.session_state.price_targets = {}
+            if "company_editor" in st.session_state:
+                del st.session_state["company_editor"]
             st.rerun()
 
     edited = st.data_editor(
