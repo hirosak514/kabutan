@@ -2107,25 +2107,22 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
 # ----------------------------------------------------------------------
 # 📰 ニュース銘柄検索（yfinance決算カレンダー + AI Web検索）
 # ----------------------------------------------------------------------
-def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
+def get_upcoming_earnings_yfinance(
+    start_days: int = 0, end_days: int = 3, target: str = "both"
+) -> list:
     """
-    yfinanceの決算カレンダーを使って、指定期間内に決算予定の銘柄を返す。
-    days > 0: 今日〜N日後
-    days < 0: N日前〜今日
-    days == 0: 今日のみ
+    yfinanceの決算カレンダーを使って、指定の日付範囲内に決算がある銘柄を返す。
+    start_days: 本日からの開始オフセット（負=過去、0=本日）
+    end_days:   本日からの終了オフセット（正=未来、0=本日）
     target: "jp"=日本株のみ / "us"=米国株のみ / "both"=両方
     """
     import yfinance as yf
     from datetime import date, timedelta
 
-    today = date.today()
-    if days >= 0:
-        start_date = today
-        end_date   = today + timedelta(days=days)
-    else:
-        start_date = today + timedelta(days=days)  # 過去方向（負）
-        end_date   = today
-    results  = []
+    today      = date.today()
+    start_date = today + timedelta(days=start_days)
+    end_date   = today + timedelta(days=end_days)
+    results    = []
 
     candidates = []
     if target in ("jp", "both"):
@@ -2151,10 +2148,11 @@ def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
                 if hasattr(ed, "date"):
                     ed = ed.date()
                 if isinstance(ed, date) and start_date <= ed <= end_date:
+                    label = "決算発表（実績）" if ed < today else "決算発表（予定）"
                     results.append({
                         "code":   code,
                         "name":   name,
-                        "event":  "決算発表（予定）" if ed >= today else "決算発表（実績）",
+                        "event":  label,
                         "date":   ed.strftime("%Y/%m/%d"),
                         "market": mkt,
                         "source": "yfinance",
@@ -2167,42 +2165,35 @@ def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
 
 
 def get_upcoming_events_ai(
-    days: int, api_choice: str,
+    start_days: int = 0, end_days: int = 3, api_choice: str = "",
     claude_api_key: str = "", grok_api_key: str = "",
     gemini_api_key: str = "", target: str = "both",
 ) -> list:
     """
-    AIのWeb検索を使って今後N日間の重要企業イベント銘柄を取得する。
-    米国株は英語プロンプト（EarningsWhispers等を指定）、日本株は日本語プロンプトで
-    それぞれ独立して検索することで精度を向上させる。
+    AIのWeb検索を使って指定期間内の重要企業イベント銘柄を取得する。
+    start_days: 本日からの開始オフセット（負=過去）
+    end_days:   本日からの終了オフセット（正=未来）
     """
     from datetime import date, timedelta
     import anthropic as _anthropic
 
-    today = date.today()
-    # daysが正なら未来方向、負なら過去方向
-    if days >= 0:
-        start_date = today
-        end_date   = today + timedelta(days=days)
-    else:
-        start_date = today + timedelta(days=days)
-        end_date   = today
-
-    start_en = start_date.strftime("%B %d, %Y")
-    end_en   = end_date.strftime("%B %d, %Y")
-    start_jp = start_date.strftime("%Y年%m月%d日")
-    end_jp   = end_date.strftime("%Y年%m月%d日")
-    date_ex  = today.strftime("%Y/%m/%d")
-
-    # 過去検索の場合は発表済みイベントを探す旨を追加
+    today      = date.today()
+    start_date = today + timedelta(days=start_days)
+    end_date   = today + timedelta(days=end_days)
+    start_en   = start_date.strftime("%B %d, %Y")
+    end_en     = end_date.strftime("%B %d, %Y")
+    start_jp   = start_date.strftime("%Y年%m月%d日")
+    end_jp     = end_date.strftime("%Y年%m月%d日")
+    date_ex    = today.strftime("%Y/%m/%d")
+    # 期間に過去が含まれる場合は実績も検索する旨を付記
     past_note_en = (
-        "\nNote: Since the search range includes past dates, "
-        "also include events that have ALREADY been announced in this period."
-        if days < 0 else ""
+        "\nNote: The search range includes past dates — also include events "
+        "that have ALREADY been announced within this period."
+        if start_days < 0 else ""
     )
     past_note_jp = (
         "\n※検索期間に過去の日付が含まれるため、すでに発表済みのイベントも含めてください。"
-        if days < 0 else ""
+        if start_days < 0 else ""
     )
 
     # 米国株向け英語プロンプト（決算カレンダー専門サイトを明示）
@@ -2366,30 +2357,28 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 index=0, horizontal=True, key="news_target",
             )
         with nc2:
-            news_days = st.slider(
-                "検索範囲（マイナス=過去、プラス=未来、0=本日のみ）",
-                min_value=-7, max_value=7, value=3, step=1, key="news_days",
+            news_range = st.slider(
+                "検索範囲（本日=0、過去はマイナス、未来はプラス）",
+                min_value=-7, max_value=7,
+                value=(0, 3),   # デフォルト：本日〜3日後
+                step=1,
+                key="news_range",
             )
+        news_start_days, news_end_days = news_range
 
         # 実際の検索期間を日付で表示
         from datetime import date as _nd, timedelta as _td
         _today = _nd.today()
-        if news_days >= 0:
-            _start = _today
-            _end   = _today + _td(days=news_days)
-        else:
-            _start = _today + _td(days=news_days)
-            _end   = _today
-
+        _s = _today + _td(days=news_start_days)
+        _e = _today + _td(days=news_end_days)
         def _dlabel(d):
             diff = (d - _today).days
             if diff == 0:   return "本日"
             elif diff > 0:  return f"{diff}日後"
             else:           return f"{abs(diff)}日前"
-
         st.info(
-            f"📅 検索期間：**{_start.strftime('%Y/%m/%d')}**（{_dlabel(_start)}）"
-            f"　〜　**{_end.strftime('%Y/%m/%d')}**（{_dlabel(_end)}）"
+            f"📅 検索期間：**{_s.strftime('%Y/%m/%d')}**（{_dlabel(_s)}）"
+            f"　〜　**{_e.strftime('%Y/%m/%d')}**（{_dlabel(_e)}）"
         )
 
         target_map = {
@@ -2402,13 +2391,15 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         if st.button("📰 重要発表銘柄を検索", use_container_width=False, key="news_search_btn"):
             with st.spinner("① yfinanceで決算カレンダーを確認中..."):
                 yf_results = get_upcoming_earnings_yfinance(
-                    days=news_days, target=target_code
+                    start_days=news_start_days, end_days=news_end_days,
+                    target=target_code,
                 )
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
             with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
                 ai_results = get_upcoming_events_ai(
-                    days=news_days, api_choice=api_choice,
+                    start_days=news_start_days, end_days=news_end_days,
+                    api_choice=api_choice,
                     claude_api_key=claude_api_key,
                     grok_api_key=grok_api_key,
                     gemini_api_key=gemini_api_key,
