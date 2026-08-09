@@ -229,6 +229,10 @@ if "trend_sort_active" not in st.session_state:
     st.session_state.trend_sort_active = False  # トレンドソート有効フラグ
 if "price_targets" not in st.session_state:
     st.session_state.price_targets = {}         # 強い上昇銘柄の株価・目標株価情報
+if "news_event_info" not in st.session_state:
+    st.session_state.news_event_info = {}       # ニュース検索から追加した銘柄のイベント情報
+if "idx_results" not in st.session_state:
+    st.session_state.idx_results = []           # インデックス検索の抽出結果
 if "numerical_scores" not in st.session_state:
     st.session_state.numerical_scores = {}      # 数値スコア {code: {score, details}}
 if "numerical_passed_codes" not in st.session_state:
@@ -1773,16 +1777,10 @@ with st.sidebar:
     analyze_count = st.slider(
         "分析する会社数",
         min_value=1,
-        max_value=500,
+        max_value=30,
         value=30,
         step=1,
-        help="対象銘柄数。30超の場合はフェーズ1（数値判定）で絞り込んだ後にAPIを使います。急騰モード時は全銘柄が対象。",
-    )
-
-    score_threshold = st.slider(
-        "数値スコア閾値（API節約フィルター）",
-        min_value=1, max_value=6, value=4, step=1,
-        help="6点満点。この点数以上の銘柄のみAI（Vision）判定へ進みます。高いほどAPI費用を節約できます。",
+        help="「更新」で取得した銘柄リストの上から何社を対象にするか指定します。急騰モード時は全銘柄が対象になります。",
     )
 
     col1, col2, col3 = st.columns(3)
@@ -1794,17 +1792,6 @@ with st.sidebar:
         chart_only_clicked = st.button("📊 グラフのみ", use_container_width=True,
                                        help="APIキー不要。チャートデータの取得と描画のみ行います。")
 
-    # フェーズ1+2：チャート取得＋数値判定（APIなし）
-    numerical_clicked = st.button(
-        "📈 チャート取得＋数値判定（APIなし）",
-        use_container_width=True,
-        help=(
-            "フェーズ1：全銘柄のチャートをyfinanceで取得\n"
-            "フェーズ2：MA・週足・月足の数値スコアで上昇銘柄を自動フィルタ\n"
-            "→ 閾値以上の銘柄のみを残してAI判定待ちにします（APIコストゼロ）"
-        ),
-    )
-
     # APIキーが入力されているときのみ有効な全自動ボタン
     active_key_for_auto = claude_api_key or grok_api_key or gemini_api_key
     auto_trend_clicked = st.button(
@@ -1812,8 +1799,7 @@ with st.sidebar:
         use_container_width=True,
         disabled=not bool(active_key_for_auto),
         help=(
-            "フェーズ1（チャート取得）→フェーズ2（数値フィルタ）→"
-            "フェーズ3（Vision AI判定）を一括実行します。\n"
+            "「グラフのみ」→「AIトレンド判定」を1クリックで実行します。\n"
             "APIキーが入力されている場合に有効になります。"
         ),
     )
@@ -2129,17 +2115,20 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
 # ----------------------------------------------------------------------
 # 📰 ニュース銘柄検索（yfinance決算カレンダー + AI Web検索）
 # ----------------------------------------------------------------------
-def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
+def get_upcoming_earnings_yfinance(
+    start_days: int = 0, end_days: int = 3, target: str = "both"
+) -> list:
     """
-    yfinanceの決算カレンダーを使って、今日〜N日後に決算予定の銘柄を返す。
-    target: "jp"=日本株のみ / "us"=米国株のみ / "both"=両方
+    yfinanceで指定期間内に決算がある銘柄を返す。
+    calendar（予定）とearnings_dates（実績含む）を両方チェック。
     """
     import yfinance as yf
     from datetime import date, timedelta
 
-    today    = date.today()
-    deadline = today + timedelta(days=days)
-    results  = []
+    today      = date.today()
+    start_date = today + timedelta(days=start_days)
+    end_date   = today + timedelta(days=end_days)
+    results    = {}
 
     candidates = []
     if target in ("jp", "both"):
@@ -2147,64 +2136,94 @@ def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
     if target in ("us", "both"):
         candidates += [(code, name, "us") for code, name in DOW30_STOCKS]
 
+    def _in_range(d):
+        return start_date <= d <= end_date
+
+    def _label(d):
+        return "決算発表（実績）" if d < today else "決算発表（予定）"
+
     for code, name, mkt in candidates:
         symbol = f"{code}.T" if mkt == "jp" else code
+        ticker = yf.Ticker(symbol)
         try:
-            cal = yf.Ticker(symbol).calendar
-            if cal is None:
-                continue
-            # calはdict or DataFrameの場合がある
-            earn_dates = []
-            if isinstance(cal, dict):
-                raw = cal.get("Earnings Date", [])
-                earn_dates = raw if isinstance(raw, list) else [raw]
-            elif hasattr(cal, "get"):
-                raw = cal.get("Earnings Date", [])
-                earn_dates = raw if isinstance(raw, list) else [raw]
+            cal = ticker.calendar
+            if cal is not None:
+                earn_dates = []
+                if isinstance(cal, dict):
+                    raw = cal.get("Earnings Date", [])
+                    earn_dates = raw if isinstance(raw, list) else [raw]
+                elif hasattr(cal, "get"):
+                    raw = cal.get("Earnings Date", [])
+                    earn_dates = raw if isinstance(raw, list) else [raw]
+                for ed in earn_dates:
+                    if hasattr(ed, "date"):
+                        ed = ed.date()
+                    if isinstance(ed, date) and _in_range(ed):
+                        results[code] = {
+                            "code": code, "name": name, "event": _label(ed),
+                            "date": ed.strftime("%Y/%m/%d"),
+                            "market": mkt, "source": "yfinance",
+                        }
+                        break
+        except Exception:
+            pass
 
-            for ed in earn_dates:
-                # Timestamp → date に変換
-                if hasattr(ed, "date"):
-                    ed = ed.date()
-                if isinstance(ed, date) and today <= ed <= deadline:
-                    results.append({
-                        "code":   code,
-                        "name":   name,
-                        "event":  "決算発表（予定）",
-                        "date":   ed.strftime("%Y/%m/%d"),
-                        "market": mkt,
-                        "source": "yfinance",
-                    })
-                    break
+        if code in results:
+            continue
+
+        try:
+            ed_df = ticker.earnings_dates
+            if ed_df is None or ed_df.empty:
+                continue
+            for ts in ed_df.index:
+                try:
+                    d = ts.date() if hasattr(ts, "date") else ts
+                    if _in_range(d):
+                        results[code] = {
+                            "code": code, "name": name, "event": _label(d),
+                            "date": d.strftime("%Y/%m/%d"),
+                            "market": mkt, "source": "yfinance",
+                        }
+                        break
+                except Exception:
+                    continue
         except Exception:
             continue
 
-    return results
+    return list(results.values())
 
 
 def get_upcoming_events_ai(
-    days: int, api_choice: str,
+    start_days: int = 0, end_days: int = 3, api_choice: str = "",
     claude_api_key: str = "", grok_api_key: str = "",
     gemini_api_key: str = "", target: str = "both",
 ) -> list:
     """
-    AIのWeb検索を使って今後N日間の重要企業イベント銘柄を取得する。
-    米国株は英語プロンプト（EarningsWhispers等を指定）、日本株は日本語プロンプトで
-    それぞれ独立して検索することで精度を向上させる。
+    AIのWeb検索を使って指定期間内の重要企業イベント銘柄を取得する。
     """
     from datetime import date, timedelta
     import anthropic as _anthropic
 
-    today    = date.today()
-    deadline = today + timedelta(days=days)
-    today_en = today.strftime("%B %d, %Y")
-    dead_en  = deadline.strftime("%B %d, %Y")
-    today_jp = today.strftime("%Y年%m月%d日")
-    dead_jp  = deadline.strftime("%Y年%m月%d日")
-    date_ex  = today.strftime("%Y/%m/%d")
+    today      = date.today()
+    start_date = today + timedelta(days=start_days)
+    end_date   = today + timedelta(days=end_days)
+    start_en   = start_date.strftime("%B %d, %Y")
+    end_en     = end_date.strftime("%B %d, %Y")
+    start_jp   = start_date.strftime("%Y年%m月%d日")
+    end_jp     = end_date.strftime("%Y年%m月%d日")
+    date_ex    = today.strftime("%Y/%m/%d")
+    past_note_en = (
+        "\nNote: The search range includes past dates — also include events "
+        "that have ALREADY been announced within this period."
+        if start_days < 0 else ""
+    )
+    past_note_jp = (
+        "\n※検索期間に過去の日付が含まれるため、発表済みのイベントも含めてください。"
+        if start_days < 0 else ""
+    )
 
     # 米国株向け英語プロンプト（決算カレンダー専門サイトを明示）
-    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {today_en} and {dead_en}.
+    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {start_en} and {end_en}.{past_note_en}
 
 Search these sources specifically:
 1. EarningsWhispers (earningswhispers.com) earnings calendar
@@ -2230,10 +2249,10 @@ Return ONLY this JSON (no explanation, no markdown):
 ]}}"""
 
     # 日本株向け日本語プロンプト
-    jp_prompt = f"""本日は{today_jp}です。
-{today_jp}から{dead_jp}までの間に、日本株（東証上場企業）で
+    jp_prompt = f"""本日は{today.strftime('%Y年%m月%d日')}です。
+{start_jp}から{end_jp}までの間に、日本株（東証上場企業）で
 以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
-Web検索して調べ、できるだけ多くリストアップしてください：
+Web検索して調べ、できるだけ多くリストアップしてください：{past_note_jp}
 - 決算発表・四半期決算・通期決算
 - 業績予想・ガイダンスの修正・上方修正・下方修正
 - M&A・合併・買収・資本業務提携
@@ -2364,10 +2383,27 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 index=0, horizontal=True, key="news_target",
             )
         with nc2:
-            news_days = st.slider(
-                "検索期間（本日からN日後まで）",
-                min_value=1, max_value=7, value=3, key="news_days",
+            news_range = st.slider(
+                "検索範囲（本日=0、過去はマイナス、未来はプラス）",
+                min_value=-7, max_value=7,
+                value=(0, 3),
+                step=1, key="news_range",
             )
+        news_start_days, news_end_days = news_range
+
+        from datetime import date as _nd, timedelta as _td
+        _today = _nd.today()
+        _s = _today + _td(days=news_start_days)
+        _e = _today + _td(days=news_end_days)
+        def _dlabel(d):
+            diff = (d - _today).days
+            if diff == 0:  return "本日"
+            elif diff > 0: return f"{diff}日後"
+            else:          return f"{abs(diff)}日前"
+        st.info(
+            f"📅 検索期間：**{_s.strftime('%Y/%m/%d')}**（{_dlabel(_s)}）"
+            f"　〜　**{_e.strftime('%Y/%m/%d')}**（{_dlabel(_e)}）"
+        )
 
         target_map = {
             "日本株・米国株 両方": "both",
@@ -2377,15 +2413,17 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         target_code = target_map[news_target]
 
         if st.button("📰 重要発表銘柄を検索", use_container_width=False, key="news_search_btn"):
-            with st.spinner("① yfinanceで決算カレンダーを確認中..."):
+            with st.spinner("① yfinanceで決算カレンダーを確認中（calendar + earnings_dates）..."):
                 yf_results = get_upcoming_earnings_yfinance(
-                    days=news_days, target=target_code
+                    start_days=news_start_days, end_days=news_end_days,
+                    target=target_code,
                 )
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
             with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
                 ai_results = get_upcoming_events_ai(
-                    days=news_days, api_choice=api_choice,
+                    start_days=news_start_days, end_days=news_end_days,
+                    api_choice=api_choice,
                     claude_api_key=claude_api_key,
                     grok_api_key=grok_api_key,
                     gemini_api_key=gemini_api_key,
@@ -2576,7 +2614,7 @@ if st.session_state.companies:
         {"選択": True, "コード": c["code"], "銘柄名": c["name"]}
         for c in visible
     ]
-    col_all, col_none, _ = st.columns([1, 1, 6])
+    col_all, col_none, col_clear, _ = st.columns([1, 1, 1.5, 4])
     with col_all:
         if st.button("✅ 全選択", use_container_width=True):
             # セッションキーを削除してリセット（次レンダリングで全チェック）
@@ -2591,6 +2629,25 @@ if st.session_state.companies:
                 "added_rows": [],
                 "deleted_rows": [],
             }
+            st.rerun()
+    with col_clear:
+        if st.button("🗑️ リストを削除", use_container_width=True,
+                     help="現在の銘柄リストを全件クリアします"):
+            st.session_state.companies = []
+            st.session_state.analysis = {}
+            st.session_state.charts = {}
+            st.session_state.daily_series = {}
+            st.session_state.selected_codes = set()
+            st.session_state.surge_ranking = []
+            st.session_state.surge_top20_codes = set()
+            st.session_state.trend_ranking = []
+            st.session_state.trend_sort_active = False
+            st.session_state.price_targets = {}
+            st.session_state.news_event_info = {}
+            st.session_state.numerical_scores = {}
+            st.session_state.numerical_passed_codes = set()
+            if "company_editor" in st.session_state:
+                del st.session_state["company_editor"]
             st.rerun()
 
     edited = st.data_editor(
@@ -2766,90 +2823,6 @@ if chart_only_clicked:
         progress.empty()
         st.success("チャートの取得が完了しました。下にスクロールして確認してください。")
 
-# ---- チャート取得＋数値判定ボタン処理（フェーズ1+2・APIなし） ----
-if numerical_clicked:
-    if not st.session_state.companies:
-        st.warning("先に「更新」ボタンまたは手動入力で銘柄リストを取得してください。")
-    else:
-        selected = st.session_state.get(
-            "selected_codes",
-            {c["code"] for c in st.session_state.companies[:analyze_count]}
-        )
-        target_companies = [
-            c for c in st.session_state.companies[:analyze_count]
-            if c["code"] in selected
-        ]
-        total = len(target_companies)
-        market_now = st.session_state.get("market", "jp")
-
-        # フェーズ1：全銘柄のチャートデータを取得
-        prog1 = st.progress(0.0, text="フェーズ1：チャートデータを取得中...")
-        for i, company in enumerate(target_companies):
-            code, name = company["code"], company["name"]
-            if code not in st.session_state.charts:
-                charts_r, daily_r = fetch_chart_images(code, name, market=market_now)
-                st.session_state.charts[code] = charts_r
-                st.session_state.daily_series[code] = daily_r
-            # 週足・月足もキャッシュ
-            for tf_key in ("week", "month"):
-                if not st.session_state.get(f"series_{tf_key}_{code}"):
-                    try:
-                        data = fetch_series_from_yfinance(code, market_now, tf_key)
-                        st.session_state[f"series_{tf_key}_{code}"] = data
-                    except Exception:
-                        pass
-            prog1.progress(
-                (i + 1) / total,
-                text=f"フェーズ1：チャート取得中... ({i+1}/{total}) {name}"
-            )
-        prog1.empty()
-
-        # フェーズ2：数値スコアリングとフィルタリング
-        num_scores = {}
-        for company in target_companies:
-            code = company["code"]
-            sd = st.session_state.daily_series.get(code, [])
-            sw = st.session_state.get(f"series_week_{code}", [])
-            sm = st.session_state.get(f"series_month_{code}", [])
-            score, details = calc_trend_score(sd, sw, sm)
-            num_scores[code] = {"score": score, "details": details, "company": company}
-
-        passed = {
-            code for code, info in num_scores.items()
-            if info["score"] >= score_threshold
-        }
-
-        st.session_state.numerical_scores = num_scores
-        st.session_state.numerical_passed_codes = passed
-
-        all_count  = len(target_companies)
-        pass_count = len(passed)
-        skip_count = all_count - pass_count
-
-        st.success(
-            f"フェーズ1+2 完了。{all_count}社中 **{pass_count}社** が"
-            f"数値スコア{score_threshold}点以上（{skip_count}社除外）。\n\n"
-            f"「🔍 AIトレンド判定」ボタンを押すと通過した{pass_count}社のみVision AIで評価します。"
-        )
-
-        # スコア一覧を表示
-        score_rows = sorted(
-            [
-                {
-                    "銘柄": f"{info['company']['name']}（{code}）",
-                    "スコア": f"{info['score']}/6",
-                    "日足": _score_to_symbol(info["details"]["day"]),
-                    "週足": _score_to_symbol(info["details"]["week"]),
-                    "月足": _score_to_symbol(info["details"]["month"]),
-                    "判定": "✅ AI判定へ" if code in passed else f"❌ 除外（{score_threshold}点未満）",
-                }
-                for code, info in num_scores.items()
-            ],
-            key=lambda x: int(x["スコア"].split("/")[0]),
-            reverse=True,
-        )
-        st.dataframe(score_rows, use_container_width=True, hide_index=True)
-
 # ---- AIトレンド判定まで自動で行うボタン処理 ----
 if auto_trend_clicked:
     if not st.session_state.companies:
@@ -2904,23 +2877,13 @@ if auto_trend_clicked:
             score, details = calc_trend_score(sd, sw_a, sm_a)
             num_scores_auto[code] = {"score": score, "details": details, "company": c}
 
-        # Vision AI判定（数値スコア閾値以上のみ）
+        # Vision AI判定
         sorted_by_num_auto = sorted(
             num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
         )
-        vision_targets_auto = [
-            (code, info) for code, info in sorted_by_num_auto
-            if info["score"] >= score_threshold
-        ]
-        if not vision_targets_auto:
-            # 閾値を満たす銘柄がなければ上位半分を対象にフォールバック
-            vision_threshold_auto = max(3, len(sorted_by_num_auto) // 2)
-            vision_targets_auto = sorted_by_num_auto[:vision_threshold_auto]
+        vision_threshold_auto = max(3, len(sorted_by_num_auto) // 2)
+        vision_targets_auto = sorted_by_num_auto[:vision_threshold_auto]
 
-        st.info(
-            f"数値スコア{score_threshold}点以上：{len(vision_targets_auto)}社 → Vision AI判定へ"
-            f"（全{len(num_scores_auto)}社中）"
-        )
         prog2 = st.progress(0.0, text="STEP 2/2 Vision AIでトレンドを判定中...")
         vision_results_auto = {}
         for i, (code, info) in enumerate(vision_targets_auto):
@@ -3136,68 +3099,39 @@ if has_analysis or has_charts:
         if not active_key:
             st.warning("サイドバーでAI APIキーを入力してください。")
         else:
-            # 数値判定済み（フェーズ1+2通過）の銘柄があればそれを優先
-            passed_codes = st.session_state.get("numerical_passed_codes", set())
-            cached_scores = st.session_state.get("numerical_scores", {})
+            target_companies_for_trend = display_companies
 
-            if passed_codes and cached_scores:
-                # フェーズ1+2完了済み → 通過銘柄のみVision判定（コスト節約）
-                target_companies_for_trend = [
-                    info["company"]
-                    for code, info in sorted(
-                        cached_scores.items(),
-                        key=lambda x: x[1]["score"], reverse=True
-                    )
-                    if code in passed_codes
-                ]
-                num_scores = cached_scores
-                st.info(
-                    f"数値判定済みの{len(passed_codes)}社をVision AIで評価します"
-                    f"（全{len(cached_scores)}社中、スコア閾値通過分のみ）。"
-                )
-            else:
-                # 数値判定未実施 → 従来通り全銘柄を数値スコアリングしてから判定
-                target_companies_for_trend = display_companies
-                st.info("数値スコアリングを実施してからVision AI判定へ進みます。")
+            # ① 数値スコアリング（全銘柄・無料）
+            num_scores = {}
+            for c in target_companies_for_trend:
+                code = c["code"]
+                sd = st.session_state.daily_series.get(code, [])
+                sw = []
+                sm = []
+                # 週足・月足データが無ければ取得
+                for tf_key, store_key in [("week", "_week"), ("month", "_month")]:
+                    data = st.session_state.get(f"series_{tf_key}_{code}", [])
+                    if not data and st.session_state.charts.get(code):
+                        try:
+                            data = fetch_series_from_yfinance(
+                                code, st.session_state.get("market", "jp"), tf_key
+                            )
+                            st.session_state[f"series_{tf_key}_{code}"] = data
+                        except Exception:
+                            data = []
+                    if tf_key == "week":
+                        sw = data
+                    else:
+                        sm = data
+                score, details = calc_trend_score(sd, sw, sm)
+                num_scores[code] = {"score": score, "details": details, "company": c}
 
-                # ① 数値スコアリング（全銘柄・無料）
-                num_scores = {}
-                for c in target_companies_for_trend:
-                    code = c["code"]
-                    sd = st.session_state.daily_series.get(code, [])
-                    sw, sm = [], []
-                    for tf_key in ("week", "month"):
-                        data = st.session_state.get(f"series_{tf_key}_{code}", [])
-                        if not data and st.session_state.charts.get(code):
-                            try:
-                                data = fetch_series_from_yfinance(
-                                    code, st.session_state.get("market", "jp"), tf_key
-                                )
-                                st.session_state[f"series_{tf_key}_{code}"] = data
-                            except Exception:
-                                data = []
-                        if tf_key == "week":
-                            sw = data
-                        else:
-                            sm = data
-                    score, details = calc_trend_score(sd, sw, sm)
-                    num_scores[code] = {"score": score, "details": details, "company": c}
-
-                sorted_by_num = sorted(
-                    num_scores.items(), key=lambda x: x[1]["score"], reverse=True
-                )
-                vision_threshold = max(3, len(sorted_by_num) // 2)
-                target_companies_for_trend = [
-                    info["company"]
-                    for code, info in sorted_by_num[:vision_threshold]
-                ]
-
-            # Vision API判定
-            vision_targets = [
-                (c["code"], num_scores[c["code"]])
-                for c in target_companies_for_trend
-                if c["code"] in num_scores
-            ]
+            # ② 数値スコア上位半分をVision APIで詳細判定
+            sorted_by_num = sorted(
+                num_scores.items(), key=lambda x: x[1]["score"], reverse=True
+            )
+            vision_threshold = max(3, len(sorted_by_num) // 2)
+            vision_targets = sorted_by_num[:vision_threshold]
 
             progress = st.progress(0.0, text="Vision AIでトレンドを判定中...")
             vision_results = {}
