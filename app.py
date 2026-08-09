@@ -17,6 +17,7 @@
 import re
 import time
 import json
+from datetime import date as _date, timedelta as _timedelta
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 import requests
@@ -737,7 +738,9 @@ def calc_volume_surge_ratio(series: list) -> float:
         return 0.0
     return avg_recent / avg_prev
 
-def fetch_series_from_yfinance(code: str, market: str, tf_key: str) -> list:
+def fetch_series_from_yfinance(
+    code: str, market: str, tf_key: str, lookback_date=None
+) -> list:
     """
     Yahoo Finance から株価データ（OHLCV）を取得して
     [{"date":..,"open":..,"high":..,"low":..,"close":..,"volume":..}, ...]
@@ -748,6 +751,8 @@ def fetch_series_from_yfinance(code: str, market: str, tf_key: str) -> list:
       コード形式を自動判定して正しいティッカーに変換する。
       英字のみで構成されるコード（例: MBLY, SOFI）は米国株として扱う。
     tf_key: "day"=日足(6ヶ月) / "week"=週足(2年) / "month"=月足(5年)
+    lookback_date: 指定した場合、この日付以前のデータのみを返す
+                   （チャートルックバック機能。Noneの場合は本日まで全件）
     """
     import yfinance as yf
 
@@ -781,16 +786,23 @@ def fetch_series_from_yfinance(code: str, market: str, tf_key: str) -> list:
             "close":  float(row["Close"]),
             "volume": float(row["Volume"]),
         })
+
+    # チャートルックバック：指定日以降のデータを切り捨てる
+    if lookback_date is not None:
+        cutoff_str = lookback_date.strftime("%Y%m%d")
+        series = [d for d in series if d["date"] <= cutoff_str]
+
     return series
 
 
-def fetch_chart_images(code: str, name: str, market: str = "jp"):
+def fetch_chart_images(code: str, name: str, market: str = "jp", lookback_date=None):
     """
     日足・週足・月足それぞれのチャートPNG（bytes）を辞書で返す。
     また日足の生データ（OHLCVリスト）も合わせて返す。
     戻り値: (charts_dict, daily_series)
       charts_dict: {"day": png_bytes, "week": png_bytes, "month": png_bytes}
       daily_series: [{"date","open","high","low","close","volume"}, ...]
+    lookback_date: 指定した場合、この日付以前のデータのみで分析する
     1. Yahoo Finance (yfinance) でデータ取得を試みる
     2. 失敗した場合のみ 株探チャートAPI (kabutan.jp) にフォールバック
     """
@@ -807,7 +819,7 @@ def fetch_chart_images(code: str, name: str, market: str = "jp"):
 
         # --- 1. Yahoo Finance で取得 ---
         try:
-            series = fetch_series_from_yfinance(code, market, key)
+            series = fetch_series_from_yfinance(code, market, key, lookback_date=lookback_date)
         except Exception:
             series = None
 
@@ -815,8 +827,15 @@ def fetch_chart_images(code: str, name: str, market: str = "jp"):
         if not series:
             try:
                 series = fetch_kabutan_series(code, m_num, market=market)
+                # 株探APIフォールバック時もルックバックを適用
+                if series and lookback_date is not None:
+                    cutoff_str = lookback_date.strftime("%Y%m%d")
+                    series = [d for d in series if d["date"] <= cutoff_str]
             except Exception:
                 series = None
+
+        if lookback_date is not None:
+            title = f"{title}（{lookback_date.strftime('%Y/%m/%d')}時点）"
 
         result[key] = render_candlestick_png(series, title) if series else None
 
@@ -1905,20 +1924,49 @@ with st.sidebar:
         grok_api_key = ""
 
     st.divider()
+
+    # 「分析する会社数」のデフォルト値を取得済み銘柄数に動的に連動させる。
+    # 銘柄リストが更新された（件数が変わった）タイミングでのみ既定値を更新し、
+    # ユーザーが手動でスライダーを動かした後の値は保持する。
+    _current_company_count = len(st.session_state.companies)
+    if "analyze_count_last_synced_total" not in st.session_state:
+        st.session_state.analyze_count_last_synced_total = -1
+    if _current_company_count != st.session_state.analyze_count_last_synced_total:
+        # 銘柄数が変化した→デフォルト値を「取得件数」（上限500）に合わせて更新
+        default_count = min(max(_current_company_count, 1), 500) if _current_company_count > 0 else 30
+        st.session_state["analyze_count"] = default_count
+        st.session_state.analyze_count_last_synced_total = _current_company_count
+
     analyze_count = st.slider(
         "分析する会社数",
         min_value=1,
         max_value=500,
-        value=30,
         step=1,
-        help="対象銘柄数。30超の場合はフェーズ1（数値判定）で絞り込んだ後にAPIを使います。急騰モード時は全銘柄が対象。",
+        help="対象銘柄数。デフォルトは取得した銘柄リストの件数に自動追従します。30超の場合はフェーズ1（数値判定）で絞り込んだ後にAPIを使います。急騰モード時は全銘柄が対象。",
+        key="analyze_count",
     )
 
     score_threshold = st.slider(
         "数値スコア閾値（API節約フィルター）",
-        min_value=1, max_value=6, value=4, step=1,
+        min_value=1, max_value=6, value=5, step=1,
         help="6点満点。この点数以上の銘柄のみAI（Vision）判定へ進みます。高いほどAPI費用を節約できます。",
     )
+
+    # チャートルックバック：基準日をN日前にずらして分析する（バックテスト用途）
+    lookback_date = st.date_input(
+        "チャートルックバック（基準日）",
+        value=_date.today(),
+        max_value=_date.today(),
+        help=(
+            "分析の基準日をカレンダーから選択します。デフォルトは本日（ルックバック0日）。\n"
+            "過去の日付を選ぶと、その日時点のチャート・数値判定・AIトレンド判定・"
+            "価格情報を再現します（その日以降のデータは使用しません）。"
+        ),
+        key="lookback_date",
+    )
+    lookback_days = (_date.today() - lookback_date).days
+    if lookback_days > 0:
+        st.caption(f"📅 {lookback_days}日前（{lookback_date.strftime('%Y/%m/%d')}）を基準に分析します。")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1980,7 +2028,7 @@ if update_clicked:
             for i, company in enumerate(companies):
                 code, name = company["code"], company["name"]
                 try:
-                    series = fetch_series_from_yfinance(code, market, "day")
+                    series = fetch_series_from_yfinance(code, market, "day", lookback_date=get_effective_lookback_date())
                     st.session_state.daily_series[code] = series
                 except Exception:
                     st.session_state.daily_series[code] = []
@@ -2005,7 +2053,7 @@ if update_clicked:
             for i, item in enumerate(top20):
                 code = item["company"]["code"]
                 name = item["company"]["name"]
-                charts, daily = fetch_chart_images(code, name, market=market)
+                charts, daily = fetch_chart_images(code, name, market=market, lookback_date=get_effective_lookback_date())
                 st.session_state.charts[code] = charts
                 if daily:
                     st.session_state.daily_series[code] = daily
@@ -2034,7 +2082,7 @@ if update_clicked:
             for i, company in enumerate(companies):
                 code, name = company["code"], company["name"]
                 try:
-                    series = fetch_series_from_yfinance(code, market, "day")
+                    series = fetch_series_from_yfinance(code, market, "day", lookback_date=get_effective_lookback_date())
                     st.session_state.daily_series[code] = series
                 except Exception:
                     st.session_state.daily_series[code] = []
@@ -2052,7 +2100,7 @@ if update_clicked:
             progress2 = st.progress(0.0, text="上位20社のチャートを描画中...")
             for i, item in enumerate(top20):
                 code, name = item["company"]["code"], item["company"]["name"]
-                charts, daily = fetch_chart_images(code, name, market=market)
+                charts, daily = fetch_chart_images(code, name, market=market, lookback_date=get_effective_lookback_date())
                 st.session_state.charts[code] = charts
                 if daily:
                     st.session_state.daily_series[code] = daily
@@ -2149,7 +2197,7 @@ if not st.session_state.companies:
                     for i, company in enumerate(companies):
                         code, name = company["code"], company["name"]
                         try:
-                            series = fetch_series_from_yfinance(code, market_for_manual, "day")
+                            series = fetch_series_from_yfinance(code, market_for_manual, "day", lookback_date=get_effective_lookback_date())
                             st.session_state.daily_series[code] = series
                         except Exception:
                             st.session_state.daily_series[code] = []
@@ -2165,7 +2213,7 @@ if not st.session_state.companies:
                     prog2 = st.progress(0.0, text="上位20社のチャートを描画中...")
                     for i, item in enumerate(top20):
                         code, name = item["company"]["code"], item["company"]["name"]
-                        charts, daily = fetch_chart_images(code, name, market=market_for_manual)
+                        charts, daily = fetch_chart_images(code, name, market=market_for_manual, lookback_date=get_effective_lookback_date())
                         st.session_state.charts[code] = charts
                         if daily:
                             st.session_state.daily_series[code] = daily
@@ -2264,6 +2312,17 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
 # ----------------------------------------------------------------------
 # 📰 ニュース銘柄検索（yfinance決算カレンダー + AI Web検索）
 # ----------------------------------------------------------------------
+def get_effective_lookback_date():
+    """
+    セッションに保存されたルックバック日付を返す。
+    本日が選択されている場合はNone（フィルタ処理不要）を返す。
+    """
+    ld = st.session_state.get("lookback_date")
+    if ld is None or ld >= _date.today():
+        return None
+    return ld
+
+
 def get_upcoming_earnings_yfinance(
     start_days: int = 0, end_days: int = 3, target: str = "both"
 ) -> list:
@@ -2895,6 +2954,7 @@ if st.session_state.companies:
             st.session_state.news_event_info = {}
             st.session_state.numerical_scores = {}
             st.session_state.numerical_passed_codes = set()
+            st.session_state.analyze_count_last_synced_total = -1
             if "company_editor" in st.session_state:
                 del st.session_state["company_editor"]
             st.rerun()
@@ -2974,7 +3034,8 @@ if analyze_clicked:
             # チャート取得（未取得の場合のみ実行）
             if code not in st.session_state.charts:
                 charts, daily = fetch_chart_images(
-                    code, name, market=st.session_state.get("market", "jp")
+                    code, name, market=st.session_state.get("market", "jp"),
+                    lookback_date=get_effective_lookback_date(),
                 )
                 st.session_state.charts[code] = charts
                 st.session_state.daily_series[code] = daily
@@ -2999,7 +3060,7 @@ if chart_only_clicked:
             code, name = company["code"], company["name"]
             if code not in st.session_state.daily_series:
                 try:
-                    series = fetch_series_from_yfinance(code, market_now, "day")
+                    series = fetch_series_from_yfinance(code, market_now, "day", lookback_date=get_effective_lookback_date())
                     st.session_state.daily_series[code] = series
                 except Exception:
                     st.session_state.daily_series[code] = []
@@ -3028,7 +3089,7 @@ if chart_only_clicked:
             code = item["company"]["code"]
             name = item["company"]["name"]
             if code not in st.session_state.charts:
-                charts, daily = fetch_chart_images(code, name, market=market_now)
+                charts, daily = fetch_chart_images(code, name, market=market_now, lookback_date=get_effective_lookback_date())
                 st.session_state.charts[code] = charts
                 if daily:
                     st.session_state.daily_series[code] = daily
@@ -3061,7 +3122,8 @@ if chart_only_clicked:
             code, name = company["code"], company["name"]
             if code not in st.session_state.charts:
                 charts, daily = fetch_chart_images(
-                    code, name, market=st.session_state.get("market", "jp")
+                    code, name, market=st.session_state.get("market", "jp"),
+                    lookback_date=get_effective_lookback_date(),
                 )
                 st.session_state.charts[code] = charts
                 st.session_state.daily_series[code] = daily
@@ -3093,13 +3155,13 @@ if numerical_clicked:
         for i, company in enumerate(target_companies):
             code, name = company["code"], company["name"]
             if code not in st.session_state.charts:
-                charts_r, daily_r = fetch_chart_images(code, name, market=market_now)
+                charts_r, daily_r = fetch_chart_images(code, name, market=market_now, lookback_date=get_effective_lookback_date())
                 st.session_state.charts[code] = charts_r
                 st.session_state.daily_series[code] = daily_r
             for tf_key in ("week", "month"):
                 if not st.session_state.get(f"series_{tf_key}_{code}"):
                     try:
-                        data = fetch_series_from_yfinance(code, market_now, tf_key)
+                        data = fetch_series_from_yfinance(code, market_now, tf_key, lookback_date=get_effective_lookback_date())
                         st.session_state[f"series_{tf_key}_{code}"] = data
                     except Exception:
                         pass
@@ -3174,7 +3236,8 @@ if auto_trend_clicked:
             code, name = company["code"], company["name"]
             if code not in st.session_state.charts:
                 charts_r, daily_r = fetch_chart_images(
-                    code, name, market=st.session_state.get("market", "jp")
+                    code, name, market=st.session_state.get("market", "jp"),
+                    lookback_date=get_effective_lookback_date(),
                 )
                 st.session_state.charts[code] = charts_r
                 st.session_state.daily_series[code] = daily_r
@@ -3196,7 +3259,8 @@ if auto_trend_clicked:
                 if not data and st.session_state.charts.get(code):
                     try:
                         data = fetch_series_from_yfinance(
-                            code, st.session_state.get("market", "jp"), tf_key
+                            code, st.session_state.get("market", "jp"), tf_key,
+                            lookback_date=get_effective_lookback_date(),
                         )
                         st.session_state[f"series_{tf_key}_{code}"] = data
                     except Exception:
