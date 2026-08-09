@@ -229,6 +229,8 @@ if "trend_sort_active" not in st.session_state:
     st.session_state.trend_sort_active = False  # トレンドソート有効フラグ
 if "price_targets" not in st.session_state:
     st.session_state.price_targets = {}         # 強い上昇銘柄の株価・目標株価情報
+if "news_event_info" not in st.session_state:
+    st.session_state.news_event_info = {}       # ニュース検索から追加した銘柄のイベント情報
 if "market" not in st.session_state:
     st.session_state.market = "jp"   # "jp" または "us"
 
@@ -1813,6 +1815,7 @@ if update_clicked:
     st.session_state.trend_ranking = []
     st.session_state.trend_sort_active = False
     st.session_state.price_targets = {}
+    st.session_state.news_event_info = {}
     if "company_editor" in st.session_state:
         del st.session_state["company_editor"]
     if companies:
@@ -2107,21 +2110,17 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
 # ----------------------------------------------------------------------
 # 📰 ニュース銘柄検索（yfinance決算カレンダー + AI Web検索）
 # ----------------------------------------------------------------------
-def get_upcoming_earnings_yfinance(
-    start_days: int = 0, end_days: int = 3, target: str = "both"
-) -> list:
+def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
     """
-    yfinanceで指定期間内に決算がある銘柄を返す。
-    calendar（予定）とearnings_dates（実績含む）を両方チェックすることで
-    発表済みの直近決算も取得できる。
+    yfinanceの決算カレンダーを使って、今日〜N日後に決算予定の銘柄を返す。
+    target: "jp"=日本株のみ / "us"=米国株のみ / "both"=両方
     """
     import yfinance as yf
     from datetime import date, timedelta
 
-    today      = date.today()
-    start_date = today + timedelta(days=start_days)
-    end_date   = today + timedelta(days=end_days)
-    results    = {}
+    today    = date.today()
+    deadline = today + timedelta(days=days)
+    results  = []
 
     candidates = []
     if target in ("jp", "both"):
@@ -2129,97 +2128,64 @@ def get_upcoming_earnings_yfinance(
     if target in ("us", "both"):
         candidates += [(code, name, "us") for code, name in DOW30_STOCKS]
 
-    def _in_range(d):
-        return start_date <= d <= end_date
-
-    def _label(d):
-        return "決算発表（実績）" if d < today else "決算発表（予定）"
-
     for code, name, mkt in candidates:
         symbol = f"{code}.T" if mkt == "jp" else code
-        ticker = yf.Ticker(symbol)
-
-        # ① calendar（主に未来の予定決算）
         try:
-            cal = ticker.calendar
-            if cal is not None:
-                earn_dates = []
-                if isinstance(cal, dict):
-                    raw = cal.get("Earnings Date", [])
-                    earn_dates = raw if isinstance(raw, list) else [raw]
-                elif hasattr(cal, "get"):
-                    raw = cal.get("Earnings Date", [])
-                    earn_dates = raw if isinstance(raw, list) else [raw]
-                for ed in earn_dates:
-                    if hasattr(ed, "date"):
-                        ed = ed.date()
-                    if isinstance(ed, date) and _in_range(ed):
-                        results[code] = {
-                            "code": code, "name": name, "event": _label(ed),
-                            "date": ed.strftime("%Y/%m/%d"),
-                            "market": mkt, "source": "yfinance",
-                        }
-                        break
-        except Exception:
-            pass
-
-        if code in results:
-            continue
-
-        # ② earnings_dates（発表済み含む過去〜未来の決算履歴）
-        try:
-            ed_df = ticker.earnings_dates
-            if ed_df is None or ed_df.empty:
+            cal = yf.Ticker(symbol).calendar
+            if cal is None:
                 continue
-            for ts in ed_df.index:
-                try:
-                    d = ts.date() if hasattr(ts, "date") else ts
-                    if _in_range(d):
-                        results[code] = {
-                            "code": code, "name": name, "event": _label(d),
-                            "date": d.strftime("%Y/%m/%d"),
-                            "market": mkt, "source": "yfinance",
-                        }
-                        break
-                except Exception:
-                    continue
+            # calはdict or DataFrameの場合がある
+            earn_dates = []
+            if isinstance(cal, dict):
+                raw = cal.get("Earnings Date", [])
+                earn_dates = raw if isinstance(raw, list) else [raw]
+            elif hasattr(cal, "get"):
+                raw = cal.get("Earnings Date", [])
+                earn_dates = raw if isinstance(raw, list) else [raw]
+
+            for ed in earn_dates:
+                # Timestamp → date に変換
+                if hasattr(ed, "date"):
+                    ed = ed.date()
+                if isinstance(ed, date) and today <= ed <= deadline:
+                    results.append({
+                        "code":   code,
+                        "name":   name,
+                        "event":  "決算発表（予定）",
+                        "date":   ed.strftime("%Y/%m/%d"),
+                        "market": mkt,
+                        "source": "yfinance",
+                    })
+                    break
         except Exception:
             continue
 
-    return list(results.values())
+    return results
 
 
 def get_upcoming_events_ai(
-    start_days: int = 0, end_days: int = 3, api_choice: str = "",
+    days: int, api_choice: str,
     claude_api_key: str = "", grok_api_key: str = "",
     gemini_api_key: str = "", target: str = "both",
 ) -> list:
     """
-    AIのWeb検索を使って指定期間内の重要企業イベント銘柄を取得する。
+    AIのWeb検索を使って今後N日間の重要企業イベント銘柄を取得する。
+    米国株は英語プロンプト（EarningsWhispers等を指定）、日本株は日本語プロンプトで
+    それぞれ独立して検索することで精度を向上させる。
     """
     from datetime import date, timedelta
     import anthropic as _anthropic
 
-    today      = date.today()
-    start_date = today + timedelta(days=start_days)
-    end_date   = today + timedelta(days=end_days)
-    start_en   = start_date.strftime("%B %d, %Y")
-    end_en     = end_date.strftime("%B %d, %Y")
-    start_jp   = start_date.strftime("%Y年%m月%d日")
-    end_jp     = end_date.strftime("%Y年%m月%d日")
-    date_ex    = today.strftime("%Y/%m/%d")
-    past_note_en = (
-        "\nNote: The search range includes past dates — also include events "
-        "that have ALREADY been announced within this period."
-        if start_days < 0 else ""
-    )
-    past_note_jp = (
-        "\n※検索期間に過去の日付が含まれるため、発表済みのイベントも含めてください。"
-        if start_days < 0 else ""
-    )
+    today    = date.today()
+    deadline = today + timedelta(days=days)
+    today_en = today.strftime("%B %d, %Y")
+    dead_en  = deadline.strftime("%B %d, %Y")
+    today_jp = today.strftime("%Y年%m月%d日")
+    dead_jp  = deadline.strftime("%Y年%m月%d日")
+    date_ex  = today.strftime("%Y/%m/%d")
 
     # 米国株向け英語プロンプト（決算カレンダー専門サイトを明示）
-    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {start_en} and {end_en}.{past_note_en}
+    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {today_en} and {dead_en}.
 
 Search these sources specifically:
 1. EarningsWhispers (earningswhispers.com) earnings calendar
@@ -2245,10 +2211,10 @@ Return ONLY this JSON (no explanation, no markdown):
 ]}}"""
 
     # 日本株向け日本語プロンプト
-    jp_prompt = f"""本日は{today.strftime('%Y年%m月%d日')}です。
-{start_jp}から{end_jp}までの間に、日本株（東証上場企業）で
+    jp_prompt = f"""本日は{today_jp}です。
+{today_jp}から{dead_jp}までの間に、日本株（東証上場企業）で
 以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
-Web検索して調べ、できるだけ多くリストアップしてください：{past_note_jp}
+Web検索して調べ、できるだけ多くリストアップしてください：
 - 決算発表・四半期決算・通期決算
 - 業績予想・ガイダンスの修正・上方修正・下方修正
 - M&A・合併・買収・資本業務提携
@@ -2379,27 +2345,10 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 index=0, horizontal=True, key="news_target",
             )
         with nc2:
-            news_range = st.slider(
-                "検索範囲（本日=0、過去はマイナス、未来はプラス）",
-                min_value=-7, max_value=7,
-                value=(0, 3),
-                step=1, key="news_range",
+            news_days = st.slider(
+                "検索期間（本日からN日後まで）",
+                min_value=1, max_value=7, value=3, key="news_days",
             )
-        news_start_days, news_end_days = news_range
-
-        from datetime import date as _nd, timedelta as _td
-        _today = _nd.today()
-        _s = _today + _td(days=news_start_days)
-        _e = _today + _td(days=news_end_days)
-        def _dlabel(d):
-            diff = (d - _today).days
-            if diff == 0:  return "本日"
-            elif diff > 0: return f"{diff}日後"
-            else:          return f"{abs(diff)}日前"
-        st.info(
-            f"📅 検索期間：**{_s.strftime('%Y/%m/%d')}**（{_dlabel(_s)}）"
-            f"　〜　**{_e.strftime('%Y/%m/%d')}**（{_dlabel(_e)}）"
-        )
 
         target_map = {
             "日本株・米国株 両方": "both",
@@ -2409,17 +2358,15 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         target_code = target_map[news_target]
 
         if st.button("📰 重要発表銘柄を検索", use_container_width=False, key="news_search_btn"):
-            with st.spinner("① yfinanceで決算カレンダーを確認中（calendar + earnings_dates）..."):
+            with st.spinner("① yfinanceで決算カレンダーを確認中..."):
                 yf_results = get_upcoming_earnings_yfinance(
-                    start_days=news_start_days, end_days=news_end_days,
-                    target=target_code,
+                    days=news_days, target=target_code
                 )
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
             with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
                 ai_results = get_upcoming_events_ai(
-                    start_days=news_start_days, end_days=news_end_days,
-                    api_choice=api_choice,
+                    days=news_days, api_choice=api_choice,
                     claude_api_key=claude_api_key,
                     grok_api_key=grok_api_key,
                     gemini_api_key=gemini_api_key,
@@ -2460,6 +2407,9 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 use_container_width=True,
                 key="news_editor",
             )
+            # news_resultsのオリジナルデータからイベント情報マップを作成
+            news_item_map = {item["code"]: item for item in news_results}
+
             if st.button("➕ チェックした銘柄をリストに追加", key="news_add_btn"):
                 to_add = [
                     {"code": r["コード"], "name": r["銘柄名"]}
@@ -2473,6 +2423,24 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                             st.session_state.companies.append(c)
                             existing.add(c["code"])
                             added.append(c["name"])
+                        # イベント情報をnews_resultsのデータから取得して保存
+                        orig = news_item_map.get(c["code"], {})
+                        events_list = orig.get("events", [])
+                        # eventsは "内容（日付）" 形式のリスト
+                        if events_list:
+                            first = events_list[0]
+                            # "内容（日付）" → 内容と日付を分離
+                            if "（" in first and first.endswith("）"):
+                                ev_text  = first[:first.rfind("（")].strip()
+                                ev_date  = first[first.rfind("（")+1:-1].strip()
+                            else:
+                                ev_text  = first
+                                ev_date  = ""
+                            st.session_state.news_event_info[c["code"]] = {
+                                "event": ev_text,
+                                "date":  ev_date,
+                                "all_events": " / ".join(events_list),
+                            }
                     if "company_editor" in st.session_state:
                         del st.session_state["company_editor"]
                     st.session_state["news_results"] = []
@@ -2610,35 +2578,21 @@ if st.session_state.companies:
         {"選択": True, "コード": c["code"], "銘柄名": c["name"]}
         for c in visible
     ]
-    col_all, col_none, col_clear, _ = st.columns([1, 1, 1.5, 4])
+    col_all, col_none, _ = st.columns([1, 1, 6])
     with col_all:
         if st.button("✅ 全選択", use_container_width=True):
+            # セッションキーを削除してリセット（次レンダリングで全チェック）
             if "company_editor" in st.session_state:
                 del st.session_state["company_editor"]
             st.rerun()
     with col_none:
         if st.button("☐ 全解除", use_container_width=True):
+            # 全解除状態を強制セット
             st.session_state["company_editor"] = {
                 "edited_rows": {i: {"選択": False} for i in range(len(df_rows))},
                 "added_rows": [],
                 "deleted_rows": [],
             }
-            st.rerun()
-    with col_clear:
-        if st.button("🗑️ リストを削除", use_container_width=True,
-                     help="現在の銘柄リストを全件クリアします"):
-            st.session_state.companies = []
-            st.session_state.analysis = {}
-            st.session_state.charts = {}
-            st.session_state.daily_series = {}
-            st.session_state.selected_codes = set()
-            st.session_state.surge_ranking = []
-            st.session_state.surge_top20_codes = set()
-            st.session_state.trend_ranking = []
-            st.session_state.trend_sort_active = False
-            st.session_state.price_targets = {}
-            if "company_editor" in st.session_state:
-                del st.session_state["company_editor"]
             st.rerun()
 
     edited = st.data_editor(
@@ -3280,6 +3234,19 @@ if has_analysis or has_charts:
         market = st.session_state.get("market", "jp")
 
         st.subheader(f"{name}（{code}）")
+
+        # ニュース検索から追加された銘柄はイベント情報を銘柄名の右横に表示
+        news_ev = st.session_state.news_event_info.get(code)
+        if news_ev and (news_ev.get("event") or news_ev.get("date")):
+            ev_text = news_ev.get("event", "")
+            ev_date = news_ev.get("date", "")
+            badge = f"📅 {ev_date}　{ev_text}" if ev_date else f"📅 {ev_text}"
+            st.markdown(
+                f'<span style="background:#e3f2fd; color:#0d47a1; padding:3px 10px; '
+                f'border-radius:12px; font-size:0.9em; font-weight:600;">'
+                f'{badge}</span>',
+                unsafe_allow_html=True,
+            )
 
         # ── 「強い上昇」銘柄：現在株価・目標株価・乖離率を表示 ──
         pt = st.session_state.price_targets.get(code)
