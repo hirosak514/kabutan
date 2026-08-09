@@ -2113,9 +2113,6 @@ def get_upcoming_earnings_yfinance(
     """
     yfinanceで指定期間内に決算がある銘柄を返す。
     calendar（予定）とearnings_dates（実績含む）を両方チェック。
-    start_days: 本日からの開始オフセット（負=過去）
-    end_days:   本日からの終了オフセット（正=未来）
-    target: "jp"=日本株のみ / "us"=米国株のみ / "both"=両方
     """
     import yfinance as yf
     from datetime import date, timedelta
@@ -2123,7 +2120,7 @@ def get_upcoming_earnings_yfinance(
     today      = date.today()
     start_date = today + timedelta(days=start_days)
     end_date   = today + timedelta(days=end_days)
-    results    = {}   # code -> dict（重複防止）
+    results    = {}
 
     candidates = []
     if target in ("jp", "both"):
@@ -2141,7 +2138,7 @@ def get_upcoming_earnings_yfinance(
         symbol = f"{code}.T" if mkt == "jp" else code
         ticker = yf.Ticker(symbol)
 
-        # ── ① calendar（主に未来の予定決算） ──
+        # ① calendar（主に未来の予定決算）
         try:
             cal = ticker.calendar
             if cal is not None:
@@ -2157,8 +2154,7 @@ def get_upcoming_earnings_yfinance(
                         ed = ed.date()
                     if isinstance(ed, date) and _in_range(ed):
                         results[code] = {
-                            "code": code, "name": name,
-                            "event": _label(ed),
+                            "code": code, "name": name, "event": _label(ed),
                             "date": ed.strftime("%Y/%m/%d"),
                             "market": mkt, "source": "yfinance",
                         }
@@ -2169,7 +2165,7 @@ def get_upcoming_earnings_yfinance(
         if code in results:
             continue
 
-        # ── ② earnings_dates（発表済み含む過去〜未来の決算履歴） ──
+        # ② earnings_dates（発表済み含む過去〜未来の決算履歴）
         try:
             ed_df = ticker.earnings_dates
             if ed_df is None or ed_df.empty:
@@ -2179,8 +2175,7 @@ def get_upcoming_earnings_yfinance(
                     d = ts.date() if hasattr(ts, "date") else ts
                     if _in_range(d):
                         results[code] = {
-                            "code": code, "name": name,
-                            "event": _label(d),
+                            "code": code, "name": name, "event": _label(d),
                             "date": d.strftime("%Y/%m/%d"),
                             "market": mkt, "source": "yfinance",
                         }
@@ -2200,8 +2195,6 @@ def get_upcoming_events_ai(
 ) -> list:
     """
     AIのWeb検索を使って指定期間内の重要企業イベント銘柄を取得する。
-    start_days: 本日からの開始オフセット（負=過去）
-    end_days:   本日からの終了オフセット（正=未来）
     """
     from datetime import date, timedelta
     import anthropic as _anthropic
@@ -2224,7 +2217,7 @@ def get_upcoming_events_ai(
         if start_days < 0 else ""
     )
 
-    # 米国株向け英語プロンプト（決算カレンダー専門サイトを明示）
+    # 米国株向け英語プロンプト
     us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {start_en} and {end_en}.{past_note_en}
 
 Search these sources specifically:
@@ -2385,10 +2378,28 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 index=0, horizontal=True, key="news_target",
             )
         with nc2:
-            news_days = st.slider(
-                "検索期間（本日からN日後まで）",
-                min_value=1, max_value=7, value=3, key="news_days",
+            news_range = st.slider(
+                "検索範囲（本日=0、過去はマイナス、未来はプラス）",
+                min_value=-7, max_value=7,
+                value=(0, 3),
+                step=1, key="news_range",
             )
+        news_start_days, news_end_days = news_range
+
+        # 実際の検索期間を日付で表示
+        from datetime import date as _nd, timedelta as _td
+        _today = _nd.today()
+        _s = _today + _td(days=news_start_days)
+        _e = _today + _td(days=news_end_days)
+        def _dlabel(d):
+            diff = (d - _today).days
+            if diff == 0:  return "本日"
+            elif diff > 0: return f"{diff}日後"
+            else:          return f"{abs(diff)}日前"
+        st.info(
+            f"📅 検索期間：**{_s.strftime('%Y/%m/%d')}**（{_dlabel(_s)}）"
+            f"　〜　**{_e.strftime('%Y/%m/%d')}**（{_dlabel(_e)}）"
+        )
 
         target_map = {
             "日本株・米国株 両方": "both",
@@ -2398,15 +2409,17 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         target_code = target_map[news_target]
 
         if st.button("📰 重要発表銘柄を検索", use_container_width=False, key="news_search_btn"):
-            with st.spinner("① yfinanceで決算カレンダーを確認中..."):
+            with st.spinner("① yfinanceで決算カレンダーを確認中（calendar + earnings_dates）..."):
                 yf_results = get_upcoming_earnings_yfinance(
-                    days=news_days, target=target_code
+                    start_days=news_start_days, end_days=news_end_days,
+                    target=target_code,
                 )
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
             with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
                 ai_results = get_upcoming_events_ai(
-                    days=news_days, api_choice=api_choice,
+                    start_days=news_start_days, end_days=news_end_days,
+                    api_choice=api_choice,
                     claude_api_key=claude_api_key,
                     grok_api_key=grok_api_key,
                     gemini_api_key=gemini_api_key,
