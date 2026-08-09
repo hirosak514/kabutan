@@ -2342,10 +2342,27 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 index=0, horizontal=True, key="news_target",
             )
         with nc2:
-            news_days = st.slider(
-                "検索期間（本日からN日後まで）",
-                min_value=1, max_value=7, value=3, key="news_days",
+            news_range = st.slider(
+                "検索範囲（本日=0、過去はマイナス、未来はプラス）",
+                min_value=-7, max_value=7,
+                value=(0, 3),
+                step=1, key="news_range",
             )
+        news_start_days, news_end_days = news_range
+
+        from datetime import date as _nd, timedelta as _td
+        _today = _nd.today()
+        _s = _today + _td(days=news_start_days)
+        _e = _today + _td(days=news_end_days)
+        def _dlabel(d):
+            diff = (d - _today).days
+            if diff == 0:  return "本日"
+            elif diff > 0: return f"{diff}日後"
+            else:          return f"{abs(diff)}日前"
+        st.info(
+            f"📅 検索期間：**{_s.strftime('%Y/%m/%d')}**（{_dlabel(_s)}）"
+            f"　〜　**{_e.strftime('%Y/%m/%d')}**（{_dlabel(_e)}）"
+        )
 
         target_map = {
             "日本株・米国株 両方": "both",
@@ -2355,15 +2372,17 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         target_code = target_map[news_target]
 
         if st.button("📰 重要発表銘柄を検索", use_container_width=False, key="news_search_btn"):
-            with st.spinner("① yfinanceで決算カレンダーを確認中..."):
+            with st.spinner("① yfinanceで決算カレンダーを確認中（calendar + earnings_dates）..."):
                 yf_results = get_upcoming_earnings_yfinance(
-                    days=news_days, target=target_code
+                    start_days=news_start_days, end_days=news_end_days,
+                    target=target_code,
                 )
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
             with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
                 ai_results = get_upcoming_events_ai(
-                    days=news_days, api_choice=api_choice,
+                    start_days=news_start_days, end_days=news_end_days,
+                    api_choice=api_choice,
                     claude_api_key=claude_api_key,
                     grok_api_key=grok_api_key,
                     gemini_api_key=gemini_api_key,
