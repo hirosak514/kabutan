@@ -2107,17 +2107,21 @@ with st.expander("📷 画像から銘柄を取得（証券会社の保有一覧
 # ----------------------------------------------------------------------
 # 📰 ニュース銘柄検索（yfinance決算カレンダー + AI Web検索）
 # ----------------------------------------------------------------------
-def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
+def get_upcoming_earnings_yfinance(
+    start_days: int = 0, end_days: int = 3, target: str = "both"
+) -> list:
     """
-    yfinanceの決算カレンダーを使って、今日〜N日後に決算予定の銘柄を返す。
-    target: "jp"=日本株のみ / "us"=米国株のみ / "both"=両方
+    yfinanceで指定期間内に決算がある銘柄を返す。
+    calendar（予定）とearnings_dates（実績含む）を両方チェックすることで
+    発表済みの直近決算も取得できる。
     """
     import yfinance as yf
     from datetime import date, timedelta
 
-    today    = date.today()
-    deadline = today + timedelta(days=days)
-    results  = []
+    today      = date.today()
+    start_date = today + timedelta(days=start_days)
+    end_date   = today + timedelta(days=end_days)
+    results    = {}
 
     candidates = []
     if target in ("jp", "both"):
@@ -2125,64 +2129,97 @@ def get_upcoming_earnings_yfinance(days: int = 3, target: str = "both") -> list:
     if target in ("us", "both"):
         candidates += [(code, name, "us") for code, name in DOW30_STOCKS]
 
+    def _in_range(d):
+        return start_date <= d <= end_date
+
+    def _label(d):
+        return "決算発表（実績）" if d < today else "決算発表（予定）"
+
     for code, name, mkt in candidates:
         symbol = f"{code}.T" if mkt == "jp" else code
-        try:
-            cal = yf.Ticker(symbol).calendar
-            if cal is None:
-                continue
-            # calはdict or DataFrameの場合がある
-            earn_dates = []
-            if isinstance(cal, dict):
-                raw = cal.get("Earnings Date", [])
-                earn_dates = raw if isinstance(raw, list) else [raw]
-            elif hasattr(cal, "get"):
-                raw = cal.get("Earnings Date", [])
-                earn_dates = raw if isinstance(raw, list) else [raw]
+        ticker = yf.Ticker(symbol)
 
-            for ed in earn_dates:
-                # Timestamp → date に変換
-                if hasattr(ed, "date"):
-                    ed = ed.date()
-                if isinstance(ed, date) and today <= ed <= deadline:
-                    results.append({
-                        "code":   code,
-                        "name":   name,
-                        "event":  "決算発表（予定）",
-                        "date":   ed.strftime("%Y/%m/%d"),
-                        "market": mkt,
-                        "source": "yfinance",
-                    })
-                    break
+        # ① calendar（主に未来の予定決算）
+        try:
+            cal = ticker.calendar
+            if cal is not None:
+                earn_dates = []
+                if isinstance(cal, dict):
+                    raw = cal.get("Earnings Date", [])
+                    earn_dates = raw if isinstance(raw, list) else [raw]
+                elif hasattr(cal, "get"):
+                    raw = cal.get("Earnings Date", [])
+                    earn_dates = raw if isinstance(raw, list) else [raw]
+                for ed in earn_dates:
+                    if hasattr(ed, "date"):
+                        ed = ed.date()
+                    if isinstance(ed, date) and _in_range(ed):
+                        results[code] = {
+                            "code": code, "name": name, "event": _label(ed),
+                            "date": ed.strftime("%Y/%m/%d"),
+                            "market": mkt, "source": "yfinance",
+                        }
+                        break
+        except Exception:
+            pass
+
+        if code in results:
+            continue
+
+        # ② earnings_dates（発表済み含む過去〜未来の決算履歴）
+        try:
+            ed_df = ticker.earnings_dates
+            if ed_df is None or ed_df.empty:
+                continue
+            for ts in ed_df.index:
+                try:
+                    d = ts.date() if hasattr(ts, "date") else ts
+                    if _in_range(d):
+                        results[code] = {
+                            "code": code, "name": name, "event": _label(d),
+                            "date": d.strftime("%Y/%m/%d"),
+                            "market": mkt, "source": "yfinance",
+                        }
+                        break
+                except Exception:
+                    continue
         except Exception:
             continue
 
-    return results
+    return list(results.values())
 
 
 def get_upcoming_events_ai(
-    days: int, api_choice: str,
+    start_days: int = 0, end_days: int = 3, api_choice: str = "",
     claude_api_key: str = "", grok_api_key: str = "",
     gemini_api_key: str = "", target: str = "both",
 ) -> list:
     """
-    AIのWeb検索を使って今後N日間の重要企業イベント銘柄を取得する。
-    米国株は英語プロンプト（EarningsWhispers等を指定）、日本株は日本語プロンプトで
-    それぞれ独立して検索することで精度を向上させる。
+    AIのWeb検索を使って指定期間内の重要企業イベント銘柄を取得する。
     """
     from datetime import date, timedelta
     import anthropic as _anthropic
 
-    today    = date.today()
-    deadline = today + timedelta(days=days)
-    today_en = today.strftime("%B %d, %Y")
-    dead_en  = deadline.strftime("%B %d, %Y")
-    today_jp = today.strftime("%Y年%m月%d日")
-    dead_jp  = deadline.strftime("%Y年%m月%d日")
-    date_ex  = today.strftime("%Y/%m/%d")
+    today      = date.today()
+    start_date = today + timedelta(days=start_days)
+    end_date   = today + timedelta(days=end_days)
+    start_en   = start_date.strftime("%B %d, %Y")
+    end_en     = end_date.strftime("%B %d, %Y")
+    start_jp   = start_date.strftime("%Y年%m月%d日")
+    end_jp     = end_date.strftime("%Y年%m月%d日")
+    date_ex    = today.strftime("%Y/%m/%d")
+    past_note_en = (
+        "\nNote: The search range includes past dates — also include events "
+        "that have ALREADY been announced within this period."
+        if start_days < 0 else ""
+    )
+    past_note_jp = (
+        "\n※検索期間に過去の日付が含まれるため、発表済みのイベントも含めてください。"
+        if start_days < 0 else ""
+    )
 
     # 米国株向け英語プロンプト（決算カレンダー専門サイトを明示）
-    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {today_en} and {dead_en}.
+    us_prompt = f"""Search for US stocks (NYSE/NASDAQ listed) with important corporate events scheduled between {start_en} and {end_en}.{past_note_en}
 
 Search these sources specifically:
 1. EarningsWhispers (earningswhispers.com) earnings calendar
@@ -2208,10 +2245,10 @@ Return ONLY this JSON (no explanation, no markdown):
 ]}}"""
 
     # 日本株向け日本語プロンプト
-    jp_prompt = f"""本日は{today_jp}です。
-{today_jp}から{dead_jp}までの間に、日本株（東証上場企業）で
+    jp_prompt = f"""本日は{today.strftime('%Y年%m月%d日')}です。
+{start_jp}から{end_jp}までの間に、日本株（東証上場企業）で
 以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
-Web検索して調べ、できるだけ多くリストアップしてください：
+Web検索して調べ、できるだけ多くリストアップしてください：{past_note_jp}
 - 決算発表・四半期決算・通期決算
 - 業績予想・ガイダンスの修正・上方修正・下方修正
 - M&A・合併・買収・資本業務提携
