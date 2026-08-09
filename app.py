@@ -3365,6 +3365,8 @@ if auto_trend_clicked:
             f"完了。{total_auto}社を分析し、「強い上昇」は{strong_count}社でした。"
             f"グラフはランキング順に並び替えられています。"
         )
+        # 画面全体を再描画し、CSVダウンロードボタン等を即座に有効化する
+        st.rerun()
 
 # ----------------------------------------------------------------------
 # 結果表示（縦スクロールで全銘柄）
@@ -3645,6 +3647,8 @@ if has_analysis or has_charts:
                 p_progress.empty()
 
             st.success("AIトレンド判定が完了しました。グラフの表示順をランキング順に変更しました。")
+            # 画面全体を再描画し、CSVダウンロードボタン等を即座に有効化する
+            st.rerun()
 
     # ── トレンドランキング表の表示 ──
     trend_ranking = st.session_state.get("trend_ranking", [])
