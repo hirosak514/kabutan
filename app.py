@@ -163,6 +163,137 @@ DOW30_STOCKS = [
     ("SOFI","SoFi"),("HOOD","Robinhood"),("PLTR","Palantir"),
     ("ARM","Arm Holdings"),("SMCI","Super Micro"),
 ]
+
+# TOPIX Core30構成銘柄（埋め込みリスト）
+TOPIX_CORE30_STOCKS = [
+    ("7203","トヨタ自動車"),("8306","三菱UFJフィナンシャルG"),("9984","ソフトバンクグループ"),
+    ("6758","ソニーグループ"),("8316","三井住友フィナンシャルG"),("6861","キーエンス"),
+    ("7974","任天堂"),("6098","リクルートHD"),("4063","信越化学工業"),("9432","日本電信電話"),
+    ("8031","三井物産"),("6367","ダイキン工業"),("8058","三菱商事"),("6857","アドバンテスト"),
+    ("9983","ファーストリテイリング"),("4502","武田薬品工業"),("8001","伊藤忠商事"),
+    ("6501","日立製作所"),("7267","本田技研工業"),("4568","第一三共"),
+    ("8411","みずほフィナンシャルグループ"),("9433","KDDI"),("8766","東京海上HD"),
+    ("6762","TDK"),("7741","HOYA"),("4543","テルモ"),("9434","ソフトバンク"),
+    ("6594","ニデック"),("8802","三菱地所"),("4519","中外製薬"),
+]
+
+# NASDAQ100・S&P500フォールバック用埋め込みリスト
+NASDAQ100_FALLBACK = [
+    ("AAPL","Apple"),("MSFT","Microsoft"),("NVDA","NVIDIA"),("AMZN","Amazon"),
+    ("META","Meta"),("GOOGL","Alphabet A"),("GOOG","Alphabet C"),("TSLA","Tesla"),
+    ("AVGO","Broadcom"),("COST","Costco"),("NFLX","Netflix"),("AMD","AMD"),
+    ("ADBE","Adobe"),("QCOM","Qualcomm"),("INTU","Intuit"),("AMAT","Applied Materials"),
+    ("TXN","Texas Instruments"),("MU","Micron"),("LRCX","Lam Research"),
+    ("KLAC","KLA"),("MRVL","Marvell"),("PANW","Palo Alto"),("CRWD","CrowdStrike"),
+    ("SNPS","Synopsys"),("CDNS","Cadence"),("ASML","ASML"),("MCHP","Microchip"),
+    ("ADI","Analog Devices"),("ON","ON Semiconductor"),("FTNT","Fortinet"),
+    ("ORCL","Oracle"),("NOW","ServiceNow"),("WDAY","Workday"),("TEAM","Atlassian"),
+    ("ABNB","Airbnb"),("BKNG","Booking Holdings"),("PCAR","PACCAR"),("PAYX","Paychex"),
+    ("CTAS","Cintas"),("FAST","Fastenal"),("VRSK","Verisk"),("DXCM","DexCom"),
+    ("ADP","ADP"),("CHTR","Charter Comm"),("CMCSA","Comcast"),("TMUS","T-Mobile"),
+    ("GILD","Gilead"),("AMGN","Amgen"),("REGN","Regeneron"),("BIIB","Biogen"),
+    ("ISRG","Intuitive Surgical"),("VRTX","Vertex"),("ILMN","Illumina"),
+    ("PEP","PepsiCo"),("MDLZ","Mondelez"),("KDP","Keurig Dr Pepper"),
+    ("MNST","Monster Beverage"),("CSX","CSX"),("EA","Electronic Arts"),
+    ("EBAY","eBay"),("PYPL","PayPal"),("ZS","Zscaler"),("CPRT","Copart"),
+    ("GEHC","GE HealthCare"),("IDXX","IDEXX"),("EXC","Exelon"),("XEL","Xcel Energy"),
+    ("AEP","AEP"),("ODFL","Old Dominion"),("ROST","Ross Stores"),("SBUX","Starbucks"),
+    ("DLTR","Dollar Tree"),("TTWO","Take-Two"),("WBD","Warner Bros"),
+    ("MRNA","Moderna"),("SMCI","Super Micro"),("ARM","Arm Holdings"),
+    ("APP","AppLovin"),("CEG","Constellation Energy"),("GFS","GlobalFoundries"),
+]
+
+SP500_FALLBACK = [
+    ("AAPL","Apple"),("MSFT","Microsoft"),("NVDA","NVIDIA"),("AMZN","Amazon"),
+    ("META","Meta"),("GOOGL","Alphabet"),("TSLA","Tesla"),("BRK-B","Berkshire"),
+    ("AVGO","Broadcom"),("JPM","JPMorgan"),("LLY","Eli Lilly"),("V","Visa"),
+    ("UNH","UnitedHealth"),("XOM","ExxonMobil"),("MA","Mastercard"),
+    ("JNJ","J&J"),("PG","P&G"),("HD","Home Depot"),("ABBV","AbbVie"),
+    ("BAC","Bank of America"),("COST","Costco"),("NFLX","Netflix"),
+    ("CRM","Salesforce"),("WMT","Walmart"),("AMD","AMD"),("MRK","Merck"),
+    ("CVX","Chevron"),("KO","Coca-Cola"),("PEP","PepsiCo"),("ADBE","Adobe"),
+    ("TMO","Thermo Fisher"),("LIN","Linde"),("ACN","Accenture"),
+    ("QCOM","Qualcomm"),("WFC","Wells Fargo"),("TXN","Texas Instruments"),
+    ("GS","Goldman Sachs"),("INTU","Intuit"),("SPGI","S&P Global"),
+    ("MS","Morgan Stanley"),("ISRG","Intuitive Surgical"),("AMGN","Amgen"),
+    ("DHR","Danaher"),("BKNG","Booking"),("C","Citigroup"),
+    ("CAT","Caterpillar"),("IBM","IBM"),("NOW","ServiceNow"),("GE","GE"),
+    ("UBER","Uber"),("BLK","BlackRock"),("AXP","AmEx"),("GILD","Gilead"),
+    ("PLD","Prologis"),("CMG","Chipotle"),("VRTX","Vertex"),("MDT","Medtronic"),
+    ("RTX","RTX"),("BA","Boeing"),("MMM","3M"),("HON","Honeywell"),
+    ("T","AT&T"),("VZ","Verizon"),("NEE","NextEra"),("DUK","Duke Energy"),
+    ("MU","Micron"),("LRCX","Lam Research"),("AMAT","Applied Materials"),
+    ("FCX","Freeport"),("NEM","Newmont"),("SLB","SLB"),("COP","ConocoPhillips"),
+    ("EOG","EOG Resources"),("PSX","Phillips 66"),("MPC","Marathon Petroleum"),
+    ("DE","Deere"),("UPS","UPS"),("FDX","FedEx"),("CSX","CSX"),("NSC","Norfolk Southern"),
+    ("REGN","Regeneron"),("BIIB","Biogen"),("BMY","BMS"),("PFE","Pfizer"),
+    ("ABT","Abbott"),("ELV","Elevance"),("CI","Cigna"),("HUM","Humana"),
+    ("LOW","Lowe's"),("TGT","Target"),("TJX","TJX"),("NKE","Nike"),
+    ("SBUX","Starbucks"),("MCD","McDonald's"),("YUM","Yum Brands"),
+    ("AMT","American Tower"),("EQIX","Equinix"),("CCI","Crown Castle"),
+    ("SBA","SBA Comm"),("O","Realty Income"),("PSA","Public Storage"),
+]
+
+
+def fetch_index_from_wikipedia(index_name: str) -> list:
+    """
+    WikipediaからS&P500またはNASDAQ100の構成銘柄を取得する。
+    失敗した場合は埋め込みフォールバックリストを返す。
+    戻り値: [(ticker, name), ...]
+    """
+    import requests
+    from bs4 import BeautifulSoup
+
+    urls = {
+        "SP500":    "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        "NASDAQ100": "https://en.wikipedia.org/wiki/Nasdaq-100",
+    }
+    url = urls.get(index_name)
+    if not url:
+        return []
+
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        if index_name == "SP500":
+            table = soup.find("table", {"id": "constituents"})
+            if not table:
+                raise ValueError("table not found")
+            rows = table.find_all("tr")[1:]
+            results = []
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) >= 2:
+                    ticker = cells[0].get_text(strip=True).replace(".", "-")
+                    name   = cells[1].get_text(strip=True)
+                    if ticker and name:
+                        results.append((ticker, name))
+            return results if results else SP500_FALLBACK
+
+        elif index_name == "NASDAQ100":
+            table = soup.find("table", {"id": "constituents"})
+            if not table:
+                tables = soup.find_all("table", class_="wikitable")
+                table = tables[0] if tables else None
+            if not table:
+                raise ValueError("table not found")
+            rows = table.find_all("tr")[1:]
+            results = []
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) >= 2:
+                    ticker = cells[1].get_text(strip=True) if len(cells) > 1 else cells[0].get_text(strip=True)
+                    name   = cells[0].get_text(strip=True)
+                    if ticker and name:
+                        results.append((ticker, name))
+            return results if results else NASDAQ100_FALLBACK
+
+    except Exception:
+        return SP500_FALLBACK if index_name == "SP500" else NASDAQ100_FALLBACK
+
+
 HEADERS = {
     # ブラウザに近い完全なヘッダーセットでbot検知を回避する
     "User-Agent": (
@@ -1777,10 +1908,16 @@ with st.sidebar:
     analyze_count = st.slider(
         "分析する会社数",
         min_value=1,
-        max_value=30,
+        max_value=500,
         value=30,
         step=1,
-        help="「更新」で取得した銘柄リストの上から何社を対象にするか指定します。急騰モード時は全銘柄が対象になります。",
+        help="対象銘柄数。30超の場合はフェーズ1（数値判定）で絞り込んだ後にAPIを使います。急騰モード時は全銘柄が対象。",
+    )
+
+    score_threshold = st.slider(
+        "数値スコア閾値（API節約フィルター）",
+        min_value=1, max_value=6, value=4, step=1,
+        help="6点満点。この点数以上の銘柄のみAI（Vision）判定へ進みます。高いほどAPI費用を節約できます。",
     )
 
     col1, col2, col3 = st.columns(3)
@@ -1792,6 +1929,17 @@ with st.sidebar:
         chart_only_clicked = st.button("📊 グラフのみ", use_container_width=True,
                                        help="APIキー不要。チャートデータの取得と描画のみ行います。")
 
+    # フェーズ1+2：チャート取得＋数値判定（APIなし）
+    numerical_clicked = st.button(
+        "📈 チャート取得＋数値判定（APIなし）",
+        use_container_width=True,
+        help=(
+            "フェーズ1：全銘柄のチャートをyfinanceで取得\n"
+            "フェーズ2：MA・週足・月足の数値スコアで上昇銘柄を自動フィルタ\n"
+            "→ 閾値以上の銘柄のみを残してAI判定待ちにします（APIコストゼロ）"
+        ),
+    )
+
     # APIキーが入力されているときのみ有効な全自動ボタン
     active_key_for_auto = claude_api_key or grok_api_key or gemini_api_key
     auto_trend_clicked = st.button(
@@ -1799,7 +1947,8 @@ with st.sidebar:
         use_container_width=True,
         disabled=not bool(active_key_for_auto),
         help=(
-            "「グラフのみ」→「AIトレンド判定」を1クリックで実行します。\n"
+            "フェーズ1（チャート取得）→フェーズ2（数値フィルタ）→"
+            "フェーズ3（Vision AI判定）を一括実行します。\n"
             "APIキーが入力されている場合に有効になります。"
         ),
     )
@@ -2488,6 +2637,106 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                     st.warning("追加する銘柄にチェックを入れてください。")
 
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# 📊 インデックス検索
+# ----------------------------------------------------------------------
+INDEX_OPTIONS = {
+    "🇯🇵 日経225（約220社）":       ("NIKKEI225",  "embedded"),
+    "🇯🇵 TOPIX Core30（30社）":     ("TOPIX30",    "embedded"),
+    "🇺🇸 NYダウ30（30社）":         ("DOW30",      "embedded"),
+    "🇺🇸 NASDAQ100（主要銘柄）":    ("NASDAQ100",  "wikipedia"),
+    "🇺🇸 S&P500（大型株）":         ("SP500",      "wikipedia"),
+}
+
+with st.expander("📊 インデックス検索（日経225・S&P500などから銘柄を抽出）", expanded=False):
+    st.caption("選択したインデックスの構成銘柄を抽出してリストに追加できます。複数選択可・重複は自動除去。")
+
+    selected_indices = []
+    for label, (key, src) in INDEX_OPTIONS.items():
+        src_badge = "（埋め込み・即時）" if src == "embedded" else "（Wikipedia・最新）"
+        if st.checkbox(f"{label} {src_badge}", key=f"idx_{key}"):
+            selected_indices.append((key, src))
+
+    if st.button("📊 選択したインデックスから銘柄を抽出", key="idx_extract_btn",
+                 disabled=not selected_indices):
+        all_stocks = {}
+
+        for key, src in selected_indices:
+            if src == "embedded":
+                stocks = {
+                    "NIKKEI225": NIKKEI225_STOCKS,
+                    "TOPIX30":   TOPIX_CORE30_STOCKS,
+                    "DOW30":     DOW30_STOCKS,
+                }.get(key, [])
+                for code, name in stocks:
+                    all_stocks[code] = name
+            else:
+                with st.spinner(f"Wikipediaから {key} の構成銘柄を取得中..."):
+                    wiki_stocks = fetch_index_from_wikipedia(key)
+                for code, name in wiki_stocks:
+                    all_stocks[code] = name
+
+        st.session_state["idx_results"] = [
+            {"code": code, "name": name} for code, name in all_stocks.items()
+        ]
+        st.success(f"合計 **{len(all_stocks)}社** を抽出しました（重複除去済み）。")
+
+    idx_results = st.session_state.get("idx_results", [])
+    if idx_results:
+        def _is_us(code):
+            return bool(re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,5}", code.upper()))
+
+        idx_rows = [
+            {
+                "追加": True,
+                "コード": r["code"],
+                "銘柄名": r["name"],
+                "市場": "🇺🇸 米国株" if _is_us(r["code"]) else "🇯🇵 日本株",
+            }
+            for r in idx_results
+        ]
+        edited_idx = st.data_editor(
+            idx_rows,
+            column_config={
+                "追加": st.column_config.CheckboxColumn("追加", default=True),
+                "コード": st.column_config.TextColumn("コード", disabled=True),
+                "銘柄名": st.column_config.TextColumn("銘柄名", disabled=True),
+                "市場": st.column_config.TextColumn("市場", disabled=True),
+            },
+            disabled=["コード", "銘柄名", "市場"],
+            hide_index=True,
+            use_container_width=True,
+            key="idx_editor",
+        )
+        idx_btn1, idx_btn2 = st.columns([2, 1])
+        with idx_btn1:
+            if st.button("➕ チェックした銘柄をリストに追加", key="idx_add_btn"):
+                to_add = [
+                    {"code": r["コード"], "name": r["銘柄名"]}
+                    for r in edited_idx if r["追加"]
+                ]
+                if to_add:
+                    existing = {c["code"] for c in st.session_state.companies}
+                    added = []
+                    for c in to_add:
+                        if c["code"] not in existing:
+                            st.session_state.companies.append(c)
+                            existing.add(c["code"])
+                            added.append(c["name"])
+                    if "company_editor" in st.session_state:
+                        del st.session_state["company_editor"]
+                    st.session_state["idx_results"] = []
+                    if added:
+                        st.success(f"{len(added)}社を追加しました。")
+                    else:
+                        st.info("選択した銘柄はすでにリストに含まれています。")
+                else:
+                    st.warning("追加する銘柄にチェックを入れてください。")
+        with idx_btn2:
+            if st.button("🗑️ この結果を消去", key="idx_clear_btn"):
+                st.session_state["idx_results"] = []
+                st.rerun()
+
 # 💾 銘柄リストの保存・読み込み
 # ----------------------------------------------------------------------
 with st.expander("💾 銘柄リストの保存・読み込み", expanded=False):
@@ -2823,6 +3072,88 @@ if chart_only_clicked:
         progress.empty()
         st.success("チャートの取得が完了しました。下にスクロールして確認してください。")
 
+# ---- チャート取得＋数値判定ボタン処理（フェーズ1+2・APIなし） ----
+if numerical_clicked:
+    if not st.session_state.companies:
+        st.warning("先に「更新」ボタンまたは手動入力で銘柄リストを取得してください。")
+    else:
+        selected = st.session_state.get(
+            "selected_codes",
+            {c["code"] for c in st.session_state.companies[:analyze_count]}
+        )
+        target_companies = [
+            c for c in st.session_state.companies[:analyze_count]
+            if c["code"] in selected
+        ]
+        total = len(target_companies)
+        market_now = st.session_state.get("market", "jp")
+
+        # フェーズ1：全銘柄のチャートデータを取得
+        prog1 = st.progress(0.0, text="フェーズ1：チャートデータを取得中...")
+        for i, company in enumerate(target_companies):
+            code, name = company["code"], company["name"]
+            if code not in st.session_state.charts:
+                charts_r, daily_r = fetch_chart_images(code, name, market=market_now)
+                st.session_state.charts[code] = charts_r
+                st.session_state.daily_series[code] = daily_r
+            for tf_key in ("week", "month"):
+                if not st.session_state.get(f"series_{tf_key}_{code}"):
+                    try:
+                        data = fetch_series_from_yfinance(code, market_now, tf_key)
+                        st.session_state[f"series_{tf_key}_{code}"] = data
+                    except Exception:
+                        pass
+            prog1.progress(
+                (i + 1) / total,
+                text=f"フェーズ1：チャート取得中... ({i+1}/{total}) {name}"
+            )
+        prog1.empty()
+
+        # フェーズ2：数値スコアリングとフィルタリング
+        num_scores = {}
+        for company in target_companies:
+            code = company["code"]
+            sd = st.session_state.daily_series.get(code, [])
+            sw = st.session_state.get(f"series_week_{code}", [])
+            sm = st.session_state.get(f"series_month_{code}", [])
+            score, details = calc_trend_score(sd, sw, sm)
+            num_scores[code] = {"score": score, "details": details, "company": company}
+
+        passed = {
+            code for code, info in num_scores.items()
+            if info["score"] >= score_threshold
+        }
+
+        st.session_state.numerical_scores = num_scores
+        st.session_state.numerical_passed_codes = passed
+
+        all_count  = len(target_companies)
+        pass_count = len(passed)
+        skip_count = all_count - pass_count
+
+        st.success(
+            f"フェーズ1+2 完了。{all_count}社中 **{pass_count}社** が"
+            f"数値スコア{score_threshold}点以上（{skip_count}社除外）。\n\n"
+            f"「🔍 AIトレンド判定」ボタンを押すと通過した{pass_count}社のみVision AIで評価します。"
+        )
+
+        score_rows = sorted(
+            [
+                {
+                    "銘柄": f"{info['company']['name']}（{code}）",
+                    "スコア": f"{info['score']}/6",
+                    "日足": _score_to_symbol(info["details"]["day"]),
+                    "週足": _score_to_symbol(info["details"]["week"]),
+                    "月足": _score_to_symbol(info["details"]["month"]),
+                    "判定": "✅ AI判定へ" if code in passed else f"❌ 除外（{score_threshold}点未満）",
+                }
+                for code, info in num_scores.items()
+            ],
+            key=lambda x: int(x["スコア"].split("/")[0]),
+            reverse=True,
+        )
+        st.dataframe(score_rows, use_container_width=True, hide_index=True)
+
 # ---- AIトレンド判定まで自動で行うボタン処理 ----
 if auto_trend_clicked:
     if not st.session_state.companies:
@@ -2877,13 +3208,22 @@ if auto_trend_clicked:
             score, details = calc_trend_score(sd, sw_a, sm_a)
             num_scores_auto[code] = {"score": score, "details": details, "company": c}
 
-        # Vision AI判定
+        # Vision AI判定（数値スコア閾値以上のみ）
         sorted_by_num_auto = sorted(
             num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
         )
-        vision_threshold_auto = max(3, len(sorted_by_num_auto) // 2)
-        vision_targets_auto = sorted_by_num_auto[:vision_threshold_auto]
+        vision_targets_auto = [
+            (code, info) for code, info in sorted_by_num_auto
+            if info["score"] >= score_threshold
+        ]
+        if not vision_targets_auto:
+            vision_threshold_auto = max(3, len(sorted_by_num_auto) // 2)
+            vision_targets_auto = sorted_by_num_auto[:vision_threshold_auto]
 
+        st.info(
+            f"数値スコア{score_threshold}点以上：{len(vision_targets_auto)}社 → Vision AI判定へ"
+            f"（全{len(num_scores_auto)}社中）"
+        )
         prog2 = st.progress(0.0, text="STEP 2/2 Vision AIでトレンドを判定中...")
         vision_results_auto = {}
         for i, (code, info) in enumerate(vision_targets_auto):
@@ -3099,39 +3439,65 @@ if has_analysis or has_charts:
         if not active_key:
             st.warning("サイドバーでAI APIキーを入力してください。")
         else:
-            target_companies_for_trend = display_companies
+            # 数値判定済み（フェーズ1+2通過）の銘柄があればそれを優先
+            passed_codes = st.session_state.get("numerical_passed_codes", set())
+            cached_scores = st.session_state.get("numerical_scores", {})
 
-            # ① 数値スコアリング（全銘柄・無料）
-            num_scores = {}
-            for c in target_companies_for_trend:
-                code = c["code"]
-                sd = st.session_state.daily_series.get(code, [])
-                sw = []
-                sm = []
-                # 週足・月足データが無ければ取得
-                for tf_key, store_key in [("week", "_week"), ("month", "_month")]:
-                    data = st.session_state.get(f"series_{tf_key}_{code}", [])
-                    if not data and st.session_state.charts.get(code):
-                        try:
-                            data = fetch_series_from_yfinance(
-                                code, st.session_state.get("market", "jp"), tf_key
-                            )
-                            st.session_state[f"series_{tf_key}_{code}"] = data
-                        except Exception:
-                            data = []
-                    if tf_key == "week":
-                        sw = data
-                    else:
-                        sm = data
-                score, details = calc_trend_score(sd, sw, sm)
-                num_scores[code] = {"score": score, "details": details, "company": c}
+            if passed_codes and cached_scores:
+                target_companies_for_trend = [
+                    info["company"]
+                    for code, info in sorted(
+                        cached_scores.items(),
+                        key=lambda x: x[1]["score"], reverse=True
+                    )
+                    if code in passed_codes
+                ]
+                num_scores = cached_scores
+                st.info(
+                    f"数値判定済みの{len(passed_codes)}社をVision AIで評価します"
+                    f"（全{len(cached_scores)}社中、スコア閾値通過分のみ）。"
+                )
+            else:
+                target_companies_for_trend = display_companies
+                st.info("数値スコアリングを実施してからVision AI判定へ進みます。")
 
-            # ② 数値スコア上位半分をVision APIで詳細判定
-            sorted_by_num = sorted(
-                num_scores.items(), key=lambda x: x[1]["score"], reverse=True
-            )
-            vision_threshold = max(3, len(sorted_by_num) // 2)
-            vision_targets = sorted_by_num[:vision_threshold]
+                # ① 数値スコアリング（全銘柄・無料）
+                num_scores = {}
+                for c in target_companies_for_trend:
+                    code = c["code"]
+                    sd = st.session_state.daily_series.get(code, [])
+                    sw, sm = [], []
+                    for tf_key in ("week", "month"):
+                        data = st.session_state.get(f"series_{tf_key}_{code}", [])
+                        if not data and st.session_state.charts.get(code):
+                            try:
+                                data = fetch_series_from_yfinance(
+                                    code, st.session_state.get("market", "jp"), tf_key
+                                )
+                                st.session_state[f"series_{tf_key}_{code}"] = data
+                            except Exception:
+                                data = []
+                        if tf_key == "week":
+                            sw = data
+                        else:
+                            sm = data
+                    score, details = calc_trend_score(sd, sw, sm)
+                    num_scores[code] = {"score": score, "details": details, "company": c}
+
+                sorted_by_num = sorted(
+                    num_scores.items(), key=lambda x: x[1]["score"], reverse=True
+                )
+                vision_threshold = max(3, len(sorted_by_num) // 2)
+                target_companies_for_trend = [
+                    info["company"]
+                    for code, info in sorted_by_num[:vision_threshold]
+                ]
+
+            vision_targets = [
+                (c["code"], num_scores[c["code"]])
+                for c in target_companies_for_trend
+                if c["code"] in num_scores
+            ]
 
             progress = st.progress(0.0, text="Vision AIでトレンドを判定中...")
             vision_results = {}
