@@ -1622,7 +1622,9 @@ def judge_trend_vision(
                                  "source": {"type": "base64",
                                             "media_type": "image/png", "data": b64}})
             content.append({"type": "text", "text": prompt})
-            resp = _anth.Anthropic(api_key=claude_api_key).messages.create(
+            resp = _anth.Anthropic(
+                api_key=claude_api_key, timeout=60.0
+            ).messages.create(
                 model="claude-sonnet-4-6", max_tokens=600,
                 messages=[{"role": "user", "content": content}],
             )
@@ -1636,8 +1638,11 @@ def judge_trend_vision(
                 content.append({"type": "image_url",
                                  "image_url": {"url": f"data:image/png;base64,{b64}"}})
             content.append({"type": "text", "text": prompt})
-            resp = _OAI(api_key=grok_api_key,
-                        base_url="https://api.x.ai/v1").chat.completions.create(
+            resp = _OAI(
+                api_key=grok_api_key,
+                base_url="https://api.x.ai/v1",
+                timeout=60.0,
+            ).chat.completions.create(
                 model="grok-4.3", max_tokens=600,
                 messages=[{"role": "user", "content": content}],
             )
@@ -1651,7 +1656,10 @@ def judge_trend_vision(
                 b64 = base64.standard_b64encode(png).decode()
                 parts.append({"mime_type": "image/png", "data": b64})
             parts.append(prompt)
-            resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(parts)
+            resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
+                parts,
+                request_options={"timeout": 60},
+            )
             return parse(resp.text)
 
     except Exception:
@@ -3289,9 +3297,15 @@ if auto_trend_clicked:
             f"（全{len(num_scores_auto)}社中）"
         )
         prog2 = st.progress(0.0, text="STEP 2/2 Vision AIでトレンドを判定中...")
-        vision_results_auto = {}
+        vision_results_auto = st.session_state.get("_vision_results_wip", {})
         for i, (code, info) in enumerate(vision_targets_auto):
             name = info["company"]["name"]
+            if code in vision_results_auto:
+                prog2.progress(
+                    (i + 1) / len(vision_targets_auto),
+                    text=f"（判定済みをスキップ）({i+1}/{len(vision_targets_auto)}) {name}"
+                )
+                continue
             result = judge_trend_vision(
                 code, name, st.session_state.charts.get(code, {}),
                 api_choice=api_choice,
@@ -3300,11 +3314,13 @@ if auto_trend_clicked:
                 gemini_api_key=gemini_api_key,
             )
             vision_results_auto[code] = result
+            st.session_state["_vision_results_wip"] = vision_results_auto
             prog2.progress(
                 (i + 1) / len(vision_targets_auto),
                 text=f"STEP 2/2 Vision判定中... ({i+1}/{len(vision_targets_auto)}) {name}"
             )
         prog2.empty()
+        st.session_state.pop("_vision_results_wip", None)
 
         # 統合・ランキング化
         overall_order_auto = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
@@ -3581,9 +3597,17 @@ if has_analysis or has_charts:
             ]
 
             progress = st.progress(0.0, text="Vision AIでトレンドを判定中...")
-            vision_results = {}
+            # 既存の途中結果があれば引き継ぐ（中断からの再開に対応）
+            vision_results = st.session_state.get("_vision_results_wip", {})
             for i, (code, info) in enumerate(vision_targets):
                 name = info["company"]["name"]
+                # 既に判定済みの銘柄はスキップ（再実行時の重複判定を防ぐ）
+                if code in vision_results:
+                    progress.progress(
+                        (i + 1) / len(vision_targets),
+                        text=f"（判定済みをスキップ）({i+1}/{len(vision_targets)}) {name}",
+                    )
+                    continue
                 charts_for_code = st.session_state.charts.get(code, {})
                 result = judge_trend_vision(
                     code, name, charts_for_code,
@@ -3593,11 +3617,15 @@ if has_analysis or has_charts:
                     gemini_api_key=gemini_api_key,
                 )
                 vision_results[code] = result
+                # 1件ごとにセッションへ保存し、途中で中断されても結果を保持する
+                st.session_state["_vision_results_wip"] = vision_results
                 progress.progress(
                     (i + 1) / len(vision_targets),
                     text=f"Vision判定中... ({i+1}/{len(vision_targets)}) {name}",
                 )
             progress.empty()
+            # 判定完了後は作業用の一時データをクリア
+            st.session_state.pop("_vision_results_wip", None)
 
             # ③ 結果を統合してランキング化
             overall_order = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
