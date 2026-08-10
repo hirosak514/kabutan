@@ -1993,9 +1993,11 @@ with st.sidebar:
                                        help="APIキー不要。チャートデータの取得と描画のみ行います。")
 
     # フェーズ1+2：チャート取得＋数値判定（APIなし）
+    _sm_running_pre = st.session_state.get("auto_trend_active", False)
     numerical_clicked = st.button(
         "📈 チャート取得＋数値判定（APIなし）",
         use_container_width=True,
+        disabled=_sm_running_pre,
         help=(
             "フェーズ1：全銘柄のチャートをyfinanceで取得\n"
             "フェーズ2：MA・週足・月足の数値スコアで上昇銘柄を自動フィルタ\n"
@@ -2024,8 +2026,9 @@ with st.sidebar:
             "vision": "STEP 3/4 Vision AI判定中",
             "price":  "STEP 4/4 目標株価取得中",
             "done":   "仕上げ処理中",
+            "done_numerical": "仕上げ処理中",
         }.get(st.session_state.get("auto_trend_stage"), "処理中")
-        st.caption(f"⏳ 自動判定 実行中：{_stage_label}（このまま画面を開いたままお待ちください）")
+        st.caption(f"⏳ 処理実行中：{_stage_label}（このまま画面を開いたままお待ちください）")
 
 # ---- 更新ボタン処理 ----
 if update_clicked:
@@ -2043,6 +2046,7 @@ if update_clicked:
     st.session_state.surge_top20_codes = set()
     st.session_state.trend_ranking = []
     st.session_state.trend_sort_active = False
+    st.session_state.pop("_numerical_score_rows_cache", None)
     st.session_state.price_targets = {}
     if "company_editor" in st.session_state:
         del st.session_state["company_editor"]
@@ -2983,12 +2987,13 @@ if st.session_state.companies:
             st.session_state.analyze_count_last_synced_total = -1
             st.session_state.auto_trend_active = False
             for _k in [
-                "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
+                "auto_trend_mode", "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
                 "auto_trend_chart_queue", "auto_trend_score_queue",
                 "auto_trend_num_scores", "auto_trend_vision_queue",
                 "auto_trend_vision_results", "auto_trend_vision_total",
                 "auto_trend_price_queue", "auto_trend_price_total",
-                "auto_trend_strong_up",
+                "auto_trend_strong_up", "_numerical_score_rows_cache",
+                "_vision_results_wip",
             ]:
                 st.session_state.pop(_k, None)
             if "company_editor" in st.session_state:
@@ -3185,75 +3190,21 @@ if numerical_clicked:
             c for c in st.session_state.companies[:analyze_count]
             if c["code"] in selected
         ]
-        total = len(target_companies)
-        market_now = st.session_state.get("market", "jp")
-
-        # フェーズ1：全銘柄のチャートデータを取得
-        prog1 = st.progress(0.0, text="フェーズ1：チャートデータを取得中...")
-        for i, company in enumerate(target_companies):
-            code, name = company["code"], company["name"]
-            if code not in st.session_state.charts:
-                charts_r, daily_r = fetch_chart_images(code, name, market=market_now, lookback_date=get_effective_lookback_date())
-                st.session_state.charts[code] = charts_r
-                st.session_state.daily_series[code] = daily_r
-            for tf_key in ("week", "month"):
-                if not st.session_state.get(f"series_{tf_key}_{code}"):
-                    try:
-                        data = fetch_series_from_yfinance(code, market_now, tf_key, lookback_date=get_effective_lookback_date())
-                        st.session_state[f"series_{tf_key}_{code}"] = data
-                    except Exception:
-                        pass
-            prog1.progress(
-                (i + 1) / total,
-                text=f"フェーズ1：チャート取得中... ({i+1}/{total}) {name}"
-            )
-        prog1.empty()
-
-        # フェーズ2：数値スコアリングとフィルタリング
-        num_scores = {}
-        for company in target_companies:
-            code = company["code"]
-            sd = st.session_state.daily_series.get(code, [])
-            sw = st.session_state.get(f"series_week_{code}", [])
-            sm = st.session_state.get(f"series_month_{code}", [])
-            score, details = calc_trend_score(sd, sw, sm)
-            num_scores[code] = {"score": score, "details": details, "company": company}
-
-        passed = {
-            code for code, info in num_scores.items()
-            if info["score"] >= score_threshold
-        }
-
-        st.session_state.numerical_scores = num_scores
-        st.session_state.numerical_passed_codes = passed
-
-        all_count  = len(target_companies)
-        pass_count = len(passed)
-        skip_count = all_count - pass_count
-
-        st.success(
-            f"フェーズ1+2 完了。{all_count}社中 **{pass_count}社** が"
-            f"数値スコア{score_threshold}点以上（{skip_count}社除外）。\n\n"
-            f"「🔍 AIトレンド判定」ボタンを押すと通過した{pass_count}社のみVision AIで評価します。"
-        )
-        st.toast(f"📈 数値判定が完了しました！（{pass_count}社が通過）", icon="✅")
-
-        score_rows = sorted(
-            [
-                {
-                    "銘柄": f"{info['company']['name']}（{code}）",
-                    "スコア": f"{info['score']}/6",
-                    "日足": _score_to_symbol(info["details"]["day"]),
-                    "週足": _score_to_symbol(info["details"]["week"]),
-                    "月足": _score_to_symbol(info["details"]["month"]),
-                    "判定": "✅ AI判定へ" if code in passed else f"❌ 除外（{score_threshold}点未満）",
-                }
-                for code, info in num_scores.items()
-            ],
-            key=lambda x: int(x["スコア"].split("/")[0]),
-            reverse=True,
-        )
-        st.dataframe(score_rows, use_container_width=True, hide_index=True)
+        # ステートマシンを「数値判定のみで停止するモード」で起動する。
+        # chart取得→scoreまでバッチ処理し、Vision AI判定へは進まない（APIコストゼロ）。
+        st.session_state.auto_trend_active = True
+        st.session_state.auto_trend_mode = "numerical_only"
+        st.session_state.auto_trend_stage = "chart"
+        st.session_state.auto_trend_companies = target_companies
+        st.session_state.auto_trend_total = len(target_companies)
+        st.session_state.auto_trend_chart_queue = [c["code"] for c in target_companies]
+        st.session_state.auto_trend_score_queue = [c["code"] for c in target_companies]
+        st.session_state.auto_trend_num_scores = {}
+        st.session_state.auto_trend_vision_queue = []
+        st.session_state.auto_trend_vision_results = {}
+        st.session_state.auto_trend_price_queue = []
+        st.session_state.auto_trend_strong_up = []
+        st.rerun()
 
 # ---- AIトレンド判定まで自動で行うボタン処理 ----
 # ----------------------------------------------------------------------
@@ -3360,28 +3311,40 @@ if st.session_state.get("auto_trend_active"):
                 }
             st.session_state.auto_trend_score_queue = queue[len(batch):]
             if not st.session_state.auto_trend_score_queue:
-                # 数値スコアリング完了 → Vision判定対象を決定
                 num_scores_auto = st.session_state.auto_trend_num_scores
-                sorted_by_num_auto = sorted(
-                    num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
-                )
-                vision_targets_auto = [
-                    code for code, info in sorted_by_num_auto
-                    if info["score"] >= score_threshold
-                ]
-                if not vision_targets_auto:
-                    vth = max(3, len(sorted_by_num_auto) // 2)
-                    vision_targets_auto = [code for code, _ in sorted_by_num_auto[:vth]]
 
-                st.session_state.auto_trend_vision_queue = vision_targets_auto
-                st.session_state.auto_trend_vision_total = len(vision_targets_auto)
-                st.toast(
-                    f"📈 STEP 2/3 数値判定が完了（{len(vision_targets_auto)}社が通過）",
-                    icon="✅"
-                )
-                if len(vision_targets_auto) > 60:
-                    st.session_state.auto_trend_show_large_warning = True
-                st.session_state.auto_trend_stage = "vision"
+                if st.session_state.get("auto_trend_mode") == "numerical_only":
+                    # ── 数値判定のみモード：ここで終了し結果を保存 ──
+                    passed = {
+                        code for code, info in num_scores_auto.items()
+                        if info["score"] >= score_threshold
+                    }
+                    st.session_state.numerical_scores = num_scores_auto
+                    st.session_state.numerical_passed_codes = passed
+                    st.session_state.auto_trend_stage = "done_numerical"
+                    st.rerun()
+                else:
+                    # 数値スコアリング完了 → Vision判定対象を決定
+                    sorted_by_num_auto = sorted(
+                        num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
+                    )
+                    vision_targets_auto = [
+                        code for code, info in sorted_by_num_auto
+                        if info["score"] >= score_threshold
+                    ]
+                    if not vision_targets_auto:
+                        vth = max(3, len(sorted_by_num_auto) // 2)
+                        vision_targets_auto = [code for code, _ in sorted_by_num_auto[:vth]]
+
+                    st.session_state.auto_trend_vision_queue = vision_targets_auto
+                    st.session_state.auto_trend_vision_total = len(vision_targets_auto)
+                    st.toast(
+                        f"📈 STEP 2/3 数値判定が完了（{len(vision_targets_auto)}社が通過）",
+                        icon="✅"
+                    )
+                    if len(vision_targets_auto) > 60:
+                        st.session_state.auto_trend_show_large_warning = True
+                    st.session_state.auto_trend_stage = "vision"
             st.rerun()
 
         # ══ STEP 3: Vision AI判定（バッチ処理） ══
@@ -3489,6 +3452,50 @@ if st.session_state.get("auto_trend_active"):
                 st.rerun()
 
         # ══ 完了 ══
+        # ══ 完了（数値判定のみモード） ══
+        elif stage == "done_numerical":
+            num_scores_final = st.session_state.get("numerical_scores", {})
+            passed_final = st.session_state.get("numerical_passed_codes", set())
+            all_count  = len(num_scores_final)
+            pass_count = len(passed_final)
+            skip_count = all_count - pass_count
+
+            st.success(
+                f"フェーズ1+2 完了。{all_count}社中 **{pass_count}社** が"
+                f"数値スコア{score_threshold}点以上（{skip_count}社除外）。\n\n"
+                f"「🔍 AIトレンド判定」ボタンを押すと通過した{pass_count}社のみVision AIで評価します。"
+            )
+            st.toast(f"📈 数値判定が完了しました！（{pass_count}社が通過）", icon="✅")
+
+            score_rows = sorted(
+                [
+                    {
+                        "銘柄": f"{info['company']['name']}（{code}）",
+                        "スコア": f"{info['score']}/6",
+                        "日足": _score_to_symbol(info["details"]["day"]),
+                        "週足": _score_to_symbol(info["details"]["week"]),
+                        "月足": _score_to_symbol(info["details"]["month"]),
+                        "判定": "✅ AI判定へ" if code in passed_final else f"❌ 除外（{score_threshold}点未満）",
+                    }
+                    for code, info in num_scores_final.items()
+                ],
+                key=lambda x: int(x["スコア"].split("/")[0]),
+                reverse=True,
+            )
+            st.session_state["_numerical_score_rows_cache"] = score_rows
+
+            # ステートマシンをクリア
+            st.session_state.auto_trend_active = False
+            for _k in [
+                "auto_trend_mode", "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
+                "auto_trend_chart_queue", "auto_trend_score_queue",
+                "auto_trend_num_scores", "auto_trend_vision_queue",
+                "auto_trend_vision_results", "auto_trend_vision_total",
+                "auto_trend_price_queue", "auto_trend_price_total",
+                "auto_trend_strong_up",
+            ]:
+                st.session_state.pop(_k, None)
+
         elif stage == "done":
             strong_count = len(st.session_state.get("auto_trend_strong_up", []))
             st.success(
@@ -3499,7 +3506,7 @@ if st.session_state.get("auto_trend_active"):
             # ステートマシンをクリア
             st.session_state.auto_trend_active = False
             for _k in [
-                "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
+                "auto_trend_mode", "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
                 "auto_trend_chart_queue", "auto_trend_score_queue",
                 "auto_trend_num_scores", "auto_trend_vision_queue",
                 "auto_trend_vision_results", "auto_trend_vision_total",
@@ -3510,12 +3517,21 @@ if st.session_state.get("auto_trend_active"):
 
     except Exception as _auto_err:
         st.error(
-            f"「AIトレンド判定まで自動で行う」の処理中にエラーが発生しました: {_auto_err}\n\n"
+            f"処理中にエラーが発生しました: {_auto_err}\n\n"
             "ここまでの進捗はセッションに保存されています。"
-            "もう一度「🚀 AIトレンド判定まで自動で行う」ボタンを押すと、"
-            "続きから再開を試みます（完全な再開を保証するものではありません）。"
+            "もう一度対象のボタンを押すと、続きから再開を試みます"
+            "（完全な再開を保証するものではありません）。"
         )
         st.session_state.auto_trend_active = False
+
+# 「📈 チャート取得＋数値判定（APIなし）」の結果テーブル表示
+# （ステートマシンの done_numerical ステージでキャッシュされたものを表示）
+if st.session_state.get("_numerical_score_rows_cache"):
+    st.subheader("📊 数値判定スコア一覧")
+    st.dataframe(
+        st.session_state["_numerical_score_rows_cache"],
+        use_container_width=True, hide_index=True,
+    )
 
 
 # ----------------------------------------------------------------------
