@@ -1932,15 +1932,15 @@ with st.sidebar:
     if "analyze_count_last_synced_total" not in st.session_state:
         st.session_state.analyze_count_last_synced_total = -1
     if _current_company_count != st.session_state.analyze_count_last_synced_total:
-        # 銘柄数が変化した→デフォルト値を「取得件数」（上限500）に合わせて更新
-        default_count = min(max(_current_company_count, 1), 500) if _current_company_count > 0 else 30
+        # 銘柄数が変化した→デフォルト値を「取得件数」（上限1000）に合わせて更新
+        default_count = min(max(_current_company_count, 1), 1000) if _current_company_count > 0 else 30
         st.session_state["analyze_count"] = default_count
         st.session_state.analyze_count_last_synced_total = _current_company_count
 
     analyze_count = st.slider(
         "分析する会社数",
         min_value=1,
-        max_value=500,
+        max_value=1000,
         step=1,
         help="対象銘柄数。デフォルトは取得した銘柄リストの件数に自動追従します。30超の場合はフェーズ1（数値判定）で絞り込んだ後にAPIを使います。急騰モード時は全銘柄が対象。",
         key="analyze_count",
