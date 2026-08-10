@@ -369,6 +369,8 @@ if "numerical_scores" not in st.session_state:
     st.session_state.numerical_scores = {}      # 数値スコア {code: {score, details}}
 if "numerical_passed_codes" not in st.session_state:
     st.session_state.numerical_passed_codes = set()  # 数値フィルタ通過銘柄コード
+if "auto_trend_active" not in st.session_state:
+    st.session_state.auto_trend_active = False   # 「AIトレンド判定まで自動で行う」の実行中フラグ
 if "market" not in st.session_state:
     st.session_state.market = "jp"   # "jp" または "us"
 
@@ -1936,9 +1938,14 @@ with st.sidebar:
     # 「分析する会社数」のデフォルト値を取得済み銘柄数に動的に連動させる。
     # 銘柄リストが更新された（件数が変わった）タイミングでのみ既定値を更新し、
     # ユーザーが手動でスライダーを動かした後の値は保持する。
+    # ※ st.slider の key と同名の session_state を widget生成前に更新する必要があるため、
+    #   ここでの代入は st.slider() 呼び出しより必ず前に置くこと。
     _current_company_count = len(st.session_state.companies)
     if "analyze_count_last_synced_total" not in st.session_state:
         st.session_state.analyze_count_last_synced_total = -1
+    if "analyze_count" not in st.session_state:
+        st.session_state["analyze_count"] = 30
+
     if _current_company_count != st.session_state.analyze_count_last_synced_total:
         # 銘柄数が変化した→デフォルト値を「取得件数」（上限1000）に合わせて更新
         default_count = min(max(_current_company_count, 1), 1000) if _current_company_count > 0 else 30
@@ -1998,16 +2005,27 @@ with st.sidebar:
 
     # APIキーが入力されているときのみ有効な全自動ボタン
     active_key_for_auto = claude_api_key or grok_api_key or gemini_api_key
+    _auto_running = st.session_state.get("auto_trend_active", False)
     auto_trend_clicked = st.button(
         "🚀 AIトレンド判定まで自動で行う",
         use_container_width=True,
-        disabled=not bool(active_key_for_auto),
+        disabled=(not bool(active_key_for_auto)) or _auto_running,
         help=(
             "フェーズ1（チャート取得）→フェーズ2（数値フィルタ）→"
             "フェーズ3（Vision AI判定）を一括実行します。\n"
-            "APIキーが入力されている場合に有効になります。"
+            "APIキーが入力されている場合に有効になります。\n"
+            "処理中は少量ずつバッチ処理を繰り返すため、画面を開いたままお待ちください。"
         ),
     )
+    if _auto_running:
+        _stage_label = {
+            "chart":  "STEP 1/4 グラフ取得中",
+            "score":  "STEP 2/4 数値スコア計算中",
+            "vision": "STEP 3/4 Vision AI判定中",
+            "price":  "STEP 4/4 目標株価取得中",
+            "done":   "仕上げ処理中",
+        }.get(st.session_state.get("auto_trend_stage"), "処理中")
+        st.caption(f"⏳ 自動判定 実行中：{_stage_label}（このまま画面を開いたままお待ちください）")
 
 # ---- 更新ボタン処理 ----
 if update_clicked:
@@ -2963,6 +2981,16 @@ if st.session_state.companies:
             st.session_state.numerical_scores = {}
             st.session_state.numerical_passed_codes = set()
             st.session_state.analyze_count_last_synced_total = -1
+            st.session_state.auto_trend_active = False
+            for _k in [
+                "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
+                "auto_trend_chart_queue", "auto_trend_score_queue",
+                "auto_trend_num_scores", "auto_trend_vision_queue",
+                "auto_trend_vision_results", "auto_trend_vision_total",
+                "auto_trend_price_queue", "auto_trend_price_total",
+                "auto_trend_strong_up",
+            ]:
+                st.session_state.pop(_k, None)
             if "company_editor" in st.session_state:
                 del st.session_state["company_editor"]
             st.rerun()
@@ -3051,6 +3079,7 @@ if analyze_clicked:
             progress.progress((i + 1) / total, text=f"{ai_label}で分析中... ({i+1}/{total}) {name}")
         progress.empty()
         st.success("分析が完了しました。下にスクロールして確認してください。")
+        st.toast("🎉 AI分析が完了しました！", icon="✅")
 
 # ---- グラフのみボタン処理 ----
 if chart_only_clicked:
@@ -3141,6 +3170,7 @@ if chart_only_clicked:
             )
         progress.empty()
         st.success("チャートの取得が完了しました。下にスクロールして確認してください。")
+        st.toast("📊 グラフの作成が完了しました！", icon="✅")
 
 # ---- チャート取得＋数値判定ボタン処理（フェーズ1+2・APIなし） ----
 if numerical_clicked:
@@ -3206,6 +3236,7 @@ if numerical_clicked:
             f"数値スコア{score_threshold}点以上（{skip_count}社除外）。\n\n"
             f"「🔍 AIトレンド判定」ボタンを押すと通過した{pass_count}社のみVision AIで評価します。"
         )
+        st.toast(f"📈 数値判定が完了しました！（{pass_count}社が通過）", icon="✅")
 
         score_rows = sorted(
             [
@@ -3225,11 +3256,23 @@ if numerical_clicked:
         st.dataframe(score_rows, use_container_width=True, hide_index=True)
 
 # ---- AIトレンド判定まで自動で行うボタン処理 ----
+# ----------------------------------------------------------------------
+# 「AIトレンド判定まで自動で行う」処理
+# タイムアウト対策として、1回のスクリプト実行では少量ずつ処理し、
+# st.rerun() で自動的に次のバッチへ進むステートマシン方式にしている。
+# こうすることで1回の実行時間を短く保ち、Streamlit Cloud側の
+# 実行時間制限やネットワークタイムアウトによる強制中断を回避する。
+# ----------------------------------------------------------------------
+_AUTO_BATCH_CHART  = 5   # 1回の実行で処理するチャート取得件数
+_AUTO_BATCH_SCORE  = 20  # 1回の実行で処理する数値スコア計算件数（軽い処理なので多め）
+_AUTO_BATCH_VISION = 2   # 1回の実行で処理するVision AI判定件数（重い処理なので少なめ）
+_AUTO_BATCH_PRICE  = 3   # 1回の実行で処理する目標株価取得件数
+
 if auto_trend_clicked:
     if not st.session_state.companies:
         st.warning("先に「更新」ボタンまたは手動入力で銘柄リストを取得してください。")
     else:
-        # ── STEP 1: グラフのみと同じ処理（チャート取得）──
+        # ステートマシンを初期化して開始する
         selected = st.session_state.get(
             "selected_codes",
             {c["code"] for c in st.session_state.companies[:analyze_count]}
@@ -3238,151 +3281,242 @@ if auto_trend_clicked:
             c for c in st.session_state.companies[:analyze_count]
             if c["code"] in selected
         ]
-        total_auto = len(target_companies_auto)
-        prog1 = st.progress(0.0, text="STEP 1/2 チャートデータを取得中...")
-        for i, company in enumerate(target_companies_auto):
-            code, name = company["code"], company["name"]
-            if code not in st.session_state.charts:
-                charts_r, daily_r = fetch_chart_images(
-                    code, name, market=st.session_state.get("market", "jp"),
-                    lookback_date=get_effective_lookback_date(),
+        st.session_state.auto_trend_active = True
+        st.session_state.auto_trend_stage = "chart"
+        st.session_state.auto_trend_companies = target_companies_auto
+        st.session_state.auto_trend_total = len(target_companies_auto)
+        st.session_state.auto_trend_chart_queue = [c["code"] for c in target_companies_auto]
+        st.session_state.auto_trend_score_queue = [c["code"] for c in target_companies_auto]
+        st.session_state.auto_trend_num_scores = {}
+        st.session_state.auto_trend_vision_queue = []
+        st.session_state.auto_trend_vision_results = {}
+        st.session_state.auto_trend_price_queue = []
+        st.session_state.auto_trend_strong_up = []
+        st.rerun()
+
+# ── ステートマシン本体：アクティブな間は毎回の実行で少量ずつ処理する ──
+if st.session_state.get("auto_trend_active"):
+    stage = st.session_state.auto_trend_stage
+    market_now = st.session_state.get("market", "jp")
+    companies_map = {c["code"]: c for c in st.session_state.auto_trend_companies}
+    total = st.session_state.auto_trend_total
+
+    try:
+        # ══ STEP 1: チャート取得（バッチ処理） ══
+        if stage == "chart":
+            queue = st.session_state.auto_trend_chart_queue
+            done = total - len(queue)
+            st.progress(
+                done / total if total else 1.0,
+                text=f"STEP 1/3 グラフ取得中... {done}/{total}"
+            )
+            batch = queue[:_AUTO_BATCH_CHART]
+            for code in batch:
+                if code not in st.session_state.charts:
+                    name = companies_map[code]["name"]
+                    charts_r, daily_r = fetch_chart_images(
+                        code, name, market=market_now,
+                        lookback_date=get_effective_lookback_date(),
+                    )
+                    st.session_state.charts[code] = charts_r
+                    st.session_state.daily_series[code] = daily_r
+            st.session_state.auto_trend_chart_queue = queue[len(batch):]
+            if not st.session_state.auto_trend_chart_queue:
+                st.toast(f"📊 STEP 1/3 グラフ取得が完了（{total}社）", icon="✅")
+                st.session_state.auto_trend_stage = "score"
+            st.rerun()
+
+        # ══ STEP 2: 数値スコア計算（バッチ処理） ══
+        elif stage == "score":
+            queue = st.session_state.auto_trend_score_queue
+            done = total - len(queue)
+            st.progress(
+                done / total if total else 1.0,
+                text=f"STEP 2/3 数値スコア計算中... {done}/{total}"
+            )
+            batch = queue[:_AUTO_BATCH_SCORE]
+            for code in batch:
+                c = companies_map[code]
+                sd = st.session_state.daily_series.get(code, [])
+                sw_a, sm_a = [], []
+                for tf_key in ("week", "month"):
+                    data = st.session_state.get(f"series_{tf_key}_{code}", [])
+                    if not data and st.session_state.charts.get(code):
+                        try:
+                            data = fetch_series_from_yfinance(
+                                code, market_now, tf_key,
+                                lookback_date=get_effective_lookback_date(),
+                            )
+                            st.session_state[f"series_{tf_key}_{code}"] = data
+                        except Exception:
+                            data = []
+                    if tf_key == "week":
+                        sw_a = data
+                    else:
+                        sm_a = data
+                score, details = calc_trend_score(sd, sw_a, sm_a)
+                st.session_state.auto_trend_num_scores[code] = {
+                    "score": score, "details": details, "company": c
+                }
+            st.session_state.auto_trend_score_queue = queue[len(batch):]
+            if not st.session_state.auto_trend_score_queue:
+                # 数値スコアリング完了 → Vision判定対象を決定
+                num_scores_auto = st.session_state.auto_trend_num_scores
+                sorted_by_num_auto = sorted(
+                    num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
                 )
-                st.session_state.charts[code] = charts_r
-                st.session_state.daily_series[code] = daily_r
-            prog1.progress(
-                (i + 1) / total_auto,
-                text=f"STEP 1/2 チャート取得中... ({i+1}/{total_auto}) {name}"
-            )
-        prog1.empty()
+                vision_targets_auto = [
+                    code for code, info in sorted_by_num_auto
+                    if info["score"] >= score_threshold
+                ]
+                if not vision_targets_auto:
+                    vth = max(3, len(sorted_by_num_auto) // 2)
+                    vision_targets_auto = [code for code, _ in sorted_by_num_auto[:vth]]
 
-        # ── STEP 2: AIトレンド判定と同じ処理 ──
-        # 数値スコアリング
-        num_scores_auto = {}
-        for c in target_companies_auto:
-            code = c["code"]
-            sd = st.session_state.daily_series.get(code, [])
-            sw_a, sm_a = [], []
-            for tf_key in ("week", "month"):
-                data = st.session_state.get(f"series_{tf_key}_{code}", [])
-                if not data and st.session_state.charts.get(code):
-                    try:
-                        data = fetch_series_from_yfinance(
-                            code, st.session_state.get("market", "jp"), tf_key,
-                            lookback_date=get_effective_lookback_date(),
-                        )
-                        st.session_state[f"series_{tf_key}_{code}"] = data
-                    except Exception:
-                        data = []
-                if tf_key == "week":
-                    sw_a = data
-                else:
-                    sm_a = data
-            score, details = calc_trend_score(sd, sw_a, sm_a)
-            num_scores_auto[code] = {"score": score, "details": details, "company": c}
-
-        # Vision AI判定（数値スコア閾値以上のみ）
-        sorted_by_num_auto = sorted(
-            num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
-        )
-        vision_targets_auto = [
-            (code, info) for code, info in sorted_by_num_auto
-            if info["score"] >= score_threshold
-        ]
-        if not vision_targets_auto:
-            vision_threshold_auto = max(3, len(sorted_by_num_auto) // 2)
-            vision_targets_auto = sorted_by_num_auto[:vision_threshold_auto]
-
-        st.info(
-            f"数値スコア{score_threshold}点以上：{len(vision_targets_auto)}社 → Vision AI判定へ"
-            f"（全{len(num_scores_auto)}社中）"
-        )
-        prog2 = st.progress(0.0, text="STEP 2/2 Vision AIでトレンドを判定中...")
-        vision_results_auto = st.session_state.get("_vision_results_wip", {})
-        for i, (code, info) in enumerate(vision_targets_auto):
-            name = info["company"]["name"]
-            if code in vision_results_auto:
-                prog2.progress(
-                    (i + 1) / len(vision_targets_auto),
-                    text=f"（判定済みをスキップ）({i+1}/{len(vision_targets_auto)}) {name}"
+                st.session_state.auto_trend_vision_queue = vision_targets_auto
+                st.session_state.auto_trend_vision_total = len(vision_targets_auto)
+                st.toast(
+                    f"📈 STEP 2/3 数値判定が完了（{len(vision_targets_auto)}社が通過）",
+                    icon="✅"
                 )
-                continue
-            result = judge_trend_vision(
-                code, name, st.session_state.charts.get(code, {}),
-                api_choice=api_choice,
-                claude_api_key=claude_api_key,
-                grok_api_key=grok_api_key,
-                gemini_api_key=gemini_api_key,
-            )
-            vision_results_auto[code] = result
-            st.session_state["_vision_results_wip"] = vision_results_auto
-            prog2.progress(
-                (i + 1) / len(vision_targets_auto),
-                text=f"STEP 2/2 Vision判定中... ({i+1}/{len(vision_targets_auto)}) {name}"
-            )
-        prog2.empty()
-        st.session_state.pop("_vision_results_wip", None)
+                if len(vision_targets_auto) > 60:
+                    st.session_state.auto_trend_show_large_warning = True
+                st.session_state.auto_trend_stage = "vision"
+            st.rerun()
 
-        # 統合・ランキング化
-        overall_order_auto = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
-        trend_ranking_auto = []
-        for code, info in num_scores_auto.items():
-            vr = vision_results_auto.get(code)
-            overall = vr["overall"] if vr else (
-                "上昇" if info["score"] >= 5 else
-                "横ばい" if info["score"] >= 3 else "下降"
-            )
-            trend_ranking_auto.append({
-                "code":        code,
-                "name":        info["company"]["name"],
-                "num_score":   info["score"],
-                "details":     info["details"],
-                "overall":     overall,
-                "confidence":  vr.get("confidence", 3) if vr else info["score"],
-                "comment":     vr.get("comment", "") if vr else "",
-                "day_trend":   vr.get("day_trend",   "") if vr else "",
-                "week_trend":  vr.get("week_trend",  "") if vr else "",
-                "month_trend": vr.get("month_trend", "") if vr else "",
-            })
-        trend_ranking_auto.sort(
-            key=lambda x: (
-                overall_order_auto.get(x["overall"], 0),
-                x["confidence"], x["num_score"],
-            ),
-            reverse=True,
-        )
-        st.session_state.trend_ranking  = trend_ranking_auto
-        st.session_state.trend_sort_active = True
+        # ══ STEP 3: Vision AI判定（バッチ処理） ══
+        elif stage == "vision":
+            queue = st.session_state.auto_trend_vision_queue
+            vtotal = st.session_state.get("auto_trend_vision_total", len(queue))
+            done = vtotal - len(queue)
 
-        # 強い上昇銘柄の価格情報を取得
-        strong_up_auto = [t for t in trend_ranking_auto if t["overall"] == "強い上昇"]
-        if strong_up_auto:
-            market_now_auto = st.session_state.get("market", "jp")
-            prog3 = st.progress(0.0, text="「強い上昇」銘柄の目標株価を取得中...")
-            for pi, item in enumerate(strong_up_auto):
-                code = item["code"]
-                ds = st.session_state.daily_series.get(code, [])
-                current_price = ds[-1]["close"] if ds else None
-                pt = get_price_target(
-                    code, item["name"], market_now_auto, current_price,
+            if st.session_state.pop("auto_trend_show_large_warning", False):
+                st.warning(
+                    f"Vision AI判定の対象が{vtotal}社と多いため、時間がかかります。"
+                    "1回の実行につき少量ずつ自動的に処理を進めますので、"
+                    "画面を開いたままお待ちください。"
+                )
+
+            st.progress(
+                done / vtotal if vtotal else 1.0,
+                text=f"STEP 3/3 Vision AIでトレンドを判定中... {done}/{vtotal}"
+            )
+            batch = queue[:_AUTO_BATCH_VISION]
+            for code in batch:
+                info = st.session_state.auto_trend_num_scores[code]
+                name = info["company"]["name"]
+                result = judge_trend_vision(
+                    code, name, st.session_state.charts.get(code, {}),
                     api_choice=api_choice,
                     claude_api_key=claude_api_key,
                     grok_api_key=grok_api_key,
                     gemini_api_key=gemini_api_key,
                 )
-                st.session_state.price_targets[code] = pt
-                prog3.progress(
-                    (pi + 1) / len(strong_up_auto),
-                    text=f"目標株価取得中... ({pi+1}/{len(strong_up_auto)}) {item['name']}",
+                st.session_state.auto_trend_vision_results[code] = result
+            st.session_state.auto_trend_vision_queue = queue[len(batch):]
+            if not st.session_state.auto_trend_vision_queue:
+                # Vision判定完了 → ランキング統合
+                num_scores_auto = st.session_state.auto_trend_num_scores
+                vision_results_auto = st.session_state.auto_trend_vision_results
+                overall_order_auto = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
+                trend_ranking_auto = []
+                for code, info in num_scores_auto.items():
+                    vr = vision_results_auto.get(code)
+                    overall = vr["overall"] if vr else (
+                        "上昇" if info["score"] >= 5 else
+                        "横ばい" if info["score"] >= 3 else "下降"
+                    )
+                    trend_ranking_auto.append({
+                        "code":        code,
+                        "name":        info["company"]["name"],
+                        "num_score":   info["score"],
+                        "details":     info["details"],
+                        "overall":     overall,
+                        "confidence":  vr.get("confidence", 3) if vr else info["score"],
+                        "comment":     vr.get("comment", "") if vr else "",
+                        "day_trend":   vr.get("day_trend",   "") if vr else "",
+                        "week_trend":  vr.get("week_trend",  "") if vr else "",
+                        "month_trend": vr.get("month_trend", "") if vr else "",
+                    })
+                trend_ranking_auto.sort(
+                    key=lambda x: (
+                        overall_order_auto.get(x["overall"], 0),
+                        x["confidence"], x["num_score"],
+                    ),
+                    reverse=True,
                 )
-            prog3.empty()
+                st.session_state.trend_ranking = trend_ranking_auto
+                st.session_state.trend_sort_active = True
 
-        strong_count = len(strong_up_auto)
-        st.success(
-            f"完了。{total_auto}社を分析し、「強い上昇」は{strong_count}社でした。"
-            f"グラフはランキング順に並び替えられています。"
+                strong_up_auto = [t for t in trend_ranking_auto if t["overall"] == "強い上昇"]
+                st.session_state.auto_trend_strong_up = strong_up_auto
+                st.session_state.auto_trend_price_queue = [t["code"] for t in strong_up_auto]
+                st.session_state.auto_trend_price_total = len(strong_up_auto)
+                st.toast(f"🔍 STEP 3/3 Vision AI判定が完了", icon="✅")
+                st.session_state.auto_trend_stage = "price"
+            st.rerun()
+
+        # ══ STEP 4: 強い上昇銘柄の目標株価取得（バッチ処理） ══
+        elif stage == "price":
+            queue = st.session_state.auto_trend_price_queue
+            ptotal = st.session_state.get("auto_trend_price_total", len(queue))
+            if ptotal == 0:
+                st.session_state.auto_trend_stage = "done"
+                st.rerun()
+            else:
+                done = ptotal - len(queue)
+                st.progress(
+                    done / ptotal,
+                    text=f"「強い上昇」銘柄の目標株価を取得中... {done}/{ptotal}"
+                )
+                batch = queue[:_AUTO_BATCH_PRICE]
+                strong_up_map = {t["code"]: t for t in st.session_state.auto_trend_strong_up}
+                for code in batch:
+                    item = strong_up_map[code]
+                    ds = st.session_state.daily_series.get(code, [])
+                    current_price = ds[-1]["close"] if ds else None
+                    pt = get_price_target(
+                        code, item["name"], market_now, current_price,
+                        api_choice=api_choice,
+                        claude_api_key=claude_api_key,
+                        grok_api_key=grok_api_key,
+                        gemini_api_key=gemini_api_key,
+                    )
+                    st.session_state.price_targets[code] = pt
+                st.session_state.auto_trend_price_queue = queue[len(batch):]
+                if not st.session_state.auto_trend_price_queue:
+                    st.session_state.auto_trend_stage = "done"
+                st.rerun()
+
+        # ══ 完了 ══
+        elif stage == "done":
+            strong_count = len(st.session_state.get("auto_trend_strong_up", []))
+            st.success(
+                f"完了。{total}社を分析し、「強い上昇」は{strong_count}社でした。"
+                f"グラフはランキング順に並び替えられています。"
+            )
+            st.toast(f"🎉 全自動処理が完了しました！（強い上昇: {strong_count}社）", icon="🎉")
+            # ステートマシンをクリア
+            st.session_state.auto_trend_active = False
+            for _k in [
+                "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
+                "auto_trend_chart_queue", "auto_trend_score_queue",
+                "auto_trend_num_scores", "auto_trend_vision_queue",
+                "auto_trend_vision_results", "auto_trend_vision_total",
+                "auto_trend_price_queue", "auto_trend_price_total",
+                "auto_trend_strong_up",
+            ]:
+                st.session_state.pop(_k, None)
+
+    except Exception as _auto_err:
+        st.error(
+            f"「AIトレンド判定まで自動で行う」の処理中にエラーが発生しました: {_auto_err}\n\n"
+            "ここまでの進捗はセッションに保存されています。"
+            "もう一度「🚀 AIトレンド判定まで自動で行う」ボタンを押すと、"
+            "続きから再開を試みます（完全な再開を保証するものではありません）。"
         )
-        # 画面全体を再描画し、CSVダウンロードボタン等を即座に有効化する
-        st.rerun()
+        st.session_state.auto_trend_active = False
+
 
 # ----------------------------------------------------------------------
 # 結果表示（縦スクロールで全銘柄）
@@ -3433,7 +3567,8 @@ if has_analysis or has_charts:
         st.header(mode_label)
     with col_trend:
         st.write("")
-        trend_btn_disabled = not bool(st.session_state.charts)
+        _auto_running_2 = st.session_state.get("auto_trend_active", False)
+        trend_btn_disabled = (not bool(st.session_state.charts)) or _auto_running_2
         ai_trend_clicked = st.button(
             "🔍 AIトレンド判定",
             use_container_width=True,
@@ -3498,37 +3633,56 @@ if has_analysis or has_charts:
             )
     with col_pdf:
         st.write("")
-        with st.spinner("PDF生成中..."):
-            try:
-                # 価格情報をcompanyデータに添付してPDFへ渡す
-                price_targets = st.session_state.get("price_targets", {})
-                companies_with_pt = []
-                for c in display_companies:
-                    c_copy = dict(c)
-                    pt = price_targets.get(c["code"])
-                    if pt:
-                        c_copy["_price_target"] = pt
-                    companies_with_pt.append(c_copy)
+        # PDFは「作成」ボタンを押した時にのみ生成する（画面描画のたびに重い処理を
+        # 走らせないため）。作成済みのPDFはセッションにキャッシュしておき、
+        # 銘柄構成が変わらない限り再利用する。
+        pdf_cache_key = (
+            tuple(c["code"] for c in display_companies),
+            bool(st.session_state.get("trend_ranking")),
+            len(st.session_state.analysis),
+        )
+        cached_pdf = st.session_state.get("_pdf_cache")
+        cached_key = st.session_state.get("_pdf_cache_key")
 
-                pdf_bytes = generate_analysis_pdf(
-                    companies_with_pt,
-                    st.session_state.analysis,
-                    st.session_state.charts,
-                    daily_series=st.session_state.daily_series,
-                    trend_ranking=st.session_state.get("trend_ranking") or None,
-                )
-                import datetime
-                suffix = "分析" if has_analysis else "グラフ"
-                filename = f"株探{suffix}_{datetime.date.today().strftime('%Y%m%d')}.pdf"
-                st.download_button(
-                    label="📄 PDFをダウンロード",
-                    data=pdf_bytes,
-                    file_name=filename,
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
-            except Exception as e:
-                st.error(f"PDF生成失敗: {e}")
+        if cached_pdf is not None and cached_key == pdf_cache_key:
+            import datetime
+            suffix = "分析" if has_analysis else "グラフ"
+            filename = f"株探{suffix}_{datetime.date.today().strftime('%Y%m%d')}.pdf"
+            st.download_button(
+                label="📄 PDFをダウンロード",
+                data=cached_pdf,
+                file_name=filename,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            if st.button("📄 PDFを作成する", use_container_width=True,
+                         help="クリックするとPDFを生成します。生成完了後にダウンロードボタンが表示されます。"):
+                with st.spinner("PDFを作成中..."):
+                    try:
+                        # 価格情報をcompanyデータに添付してPDFへ渡す
+                        price_targets = st.session_state.get("price_targets", {})
+                        companies_with_pt = []
+                        for c in display_companies:
+                            c_copy = dict(c)
+                            pt = price_targets.get(c["code"])
+                            if pt:
+                                c_copy["_price_target"] = pt
+                            companies_with_pt.append(c_copy)
+
+                        pdf_bytes = generate_analysis_pdf(
+                            companies_with_pt,
+                            st.session_state.analysis,
+                            st.session_state.charts,
+                            daily_series=st.session_state.daily_series,
+                            trend_ranking=st.session_state.get("trend_ranking") or None,
+                        )
+                        st.session_state["_pdf_cache"] = pdf_bytes
+                        st.session_state["_pdf_cache_key"] = pdf_cache_key
+                        st.toast("📄 PDFの準備ができました！下のボタンからダウンロードできます。", icon="✅")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"PDF生成失敗: {e}")
 
     # ── AIトレンド判定の処理 ──
     if ai_trend_clicked:
@@ -3536,162 +3690,59 @@ if has_analysis or has_charts:
         if not active_key:
             st.warning("サイドバーでAI APIキーを入力してください。")
         else:
-            # 数値判定済み（フェーズ1+2通過）の銘柄があればそれを優先
-            passed_codes = st.session_state.get("numerical_passed_codes", set())
-            cached_scores = st.session_state.get("numerical_scores", {})
+            # 数値判定済み（フェーズ1+2通過）の銘柄があればそれを優先して使う
+            passed_codes  = st.session_state.get("numerical_passed_codes", set())
+            cached_scores = st.session_state.get("numerical_passed_codes") and \
+                            st.session_state.get("numerical_scores", {})
 
-            if passed_codes and cached_scores:
+            if passed_codes and st.session_state.get("numerical_scores"):
                 target_companies_for_trend = [
                     info["company"]
                     for code, info in sorted(
-                        cached_scores.items(),
+                        st.session_state.numerical_scores.items(),
                         key=lambda x: x[1]["score"], reverse=True
                     )
                     if code in passed_codes
                 ]
-                num_scores = cached_scores
                 st.info(
                     f"数値判定済みの{len(passed_codes)}社をVision AIで評価します"
-                    f"（全{len(cached_scores)}社中、スコア閾値通過分のみ）。"
+                    f"（全{len(st.session_state.numerical_scores)}社中、スコア閾値通過分のみ）。"
                 )
+                # ステートマシンをscoreステージ完了済みの状態で開始（=voteはvisionから）
+                st.session_state.auto_trend_active = True
+                st.session_state.auto_trend_stage = "vision"
+                st.session_state.auto_trend_companies = target_companies_for_trend
+                st.session_state.auto_trend_total = len(target_companies_for_trend)
+                st.session_state.auto_trend_num_scores = {
+                    c["code"]: st.session_state.numerical_scores[c["code"]]
+                    for c in target_companies_for_trend
+                    if c["code"] in st.session_state.numerical_scores
+                }
+                st.session_state.auto_trend_vision_queue = [
+                    c["code"] for c in target_companies_for_trend
+                ]
+                st.session_state.auto_trend_vision_total = len(target_companies_for_trend)
+                st.session_state.auto_trend_vision_results = {}
             else:
+                # 数値判定未実施 → ステートマシンをscoreステージから開始
+                # （chartは既に取得済みの前提。取得漏れがあればscoreステージ内で個別に補完される）
                 target_companies_for_trend = display_companies
                 st.info("数値スコアリングを実施してからVision AI判定へ進みます。")
-
-                # ① 数値スコアリング（全銘柄・無料）
-                num_scores = {}
-                for c in target_companies_for_trend:
-                    code = c["code"]
-                    sd = st.session_state.daily_series.get(code, [])
-                    sw, sm = [], []
-                    for tf_key in ("week", "month"):
-                        data = st.session_state.get(f"series_{tf_key}_{code}", [])
-                        if not data and st.session_state.charts.get(code):
-                            try:
-                                data = fetch_series_from_yfinance(
-                                    code, st.session_state.get("market", "jp"), tf_key
-                                )
-                                st.session_state[f"series_{tf_key}_{code}"] = data
-                            except Exception:
-                                data = []
-                        if tf_key == "week":
-                            sw = data
-                        else:
-                            sm = data
-                    score, details = calc_trend_score(sd, sw, sm)
-                    num_scores[code] = {"score": score, "details": details, "company": c}
-
-                sorted_by_num = sorted(
-                    num_scores.items(), key=lambda x: x[1]["score"], reverse=True
-                )
-                vision_threshold = max(3, len(sorted_by_num) // 2)
-                target_companies_for_trend = [
-                    info["company"]
-                    for code, info in sorted_by_num[:vision_threshold]
+                st.session_state.auto_trend_active = True
+                st.session_state.auto_trend_stage = "score"
+                st.session_state.auto_trend_companies = target_companies_for_trend
+                st.session_state.auto_trend_total = len(target_companies_for_trend)
+                st.session_state.auto_trend_score_queue = [
+                    c["code"] for c in target_companies_for_trend
                 ]
+                st.session_state.auto_trend_num_scores = {}
+                st.session_state.auto_trend_vision_queue = []
+                st.session_state.auto_trend_vision_results = {}
 
-            vision_targets = [
-                (c["code"], num_scores[c["code"]])
-                for c in target_companies_for_trend
-                if c["code"] in num_scores
-            ]
-
-            progress = st.progress(0.0, text="Vision AIでトレンドを判定中...")
-            # 既存の途中結果があれば引き継ぐ（中断からの再開に対応）
-            vision_results = st.session_state.get("_vision_results_wip", {})
-            for i, (code, info) in enumerate(vision_targets):
-                name = info["company"]["name"]
-                # 既に判定済みの銘柄はスキップ（再実行時の重複判定を防ぐ）
-                if code in vision_results:
-                    progress.progress(
-                        (i + 1) / len(vision_targets),
-                        text=f"（判定済みをスキップ）({i+1}/{len(vision_targets)}) {name}",
-                    )
-                    continue
-                charts_for_code = st.session_state.charts.get(code, {})
-                result = judge_trend_vision(
-                    code, name, charts_for_code,
-                    api_choice=api_choice,
-                    claude_api_key=claude_api_key,
-                    grok_api_key=grok_api_key,
-                    gemini_api_key=gemini_api_key,
-                )
-                vision_results[code] = result
-                # 1件ごとにセッションへ保存し、途中で中断されても結果を保持する
-                st.session_state["_vision_results_wip"] = vision_results
-                progress.progress(
-                    (i + 1) / len(vision_targets),
-                    text=f"Vision判定中... ({i+1}/{len(vision_targets)}) {name}",
-                )
-            progress.empty()
-            # 判定完了後は作業用の一時データをクリア
-            st.session_state.pop("_vision_results_wip", None)
-
-            # ③ 結果を統合してランキング化
-            overall_order = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
-            trend_ranking = []
-            for code, info in num_scores.items():
-                vr = vision_results.get(code)
-                overall = vr["overall"] if vr else (
-                    "上昇" if info["score"] >= 5 else
-                    "横ばい" if info["score"] >= 3 else "下降"
-                )
-                confidence = vr.get("confidence", 3) if vr else info["score"]
-                comment = vr.get("comment", "") if vr else ""
-                trend_ranking.append({
-                    "code":       code,
-                    "name":       info["company"]["name"],
-                    "num_score":  info["score"],
-                    "details":    info["details"],
-                    "overall":    overall,
-                    "confidence": confidence,
-                    "comment":    comment,
-                    "day_trend":  vr.get("day_trend",   "") if vr else "",
-                    "week_trend": vr.get("week_trend",  "") if vr else "",
-                    "month_trend":vr.get("month_trend", "") if vr else "",
-                })
-            # 総合判定スコア → 確信度 → 数値スコアの順で降順ソート
-            trend_ranking.sort(
-                key=lambda x: (
-                    overall_order.get(x["overall"], 0),
-                    x["confidence"],
-                    x["num_score"],
-                ),
-                reverse=True,
-            )
-            st.session_state.trend_ranking  = trend_ranking
-            st.session_state.trend_sort_active = True
-
-            # 「強い上昇」銘柄の価格・目標株価を自動取得
-            strong_up = [item for item in trend_ranking if item["overall"] == "強い上昇"]
-            if strong_up:
-                p_progress = st.progress(0.0, text="「強い上昇」銘柄の目標株価を取得中...")
-                market_now = st.session_state.get("market", "jp")
-                for pi, item in enumerate(strong_up):
-                    code = item["code"]
-                    name = item["name"]
-                    # 現在株価は取得済みの日足データ最終値を使用
-                    ds = st.session_state.daily_series.get(code, [])
-                    current_price = ds[-1]["close"] if ds else None
-                    is_jp = (market_now == "jp" and
-                             not re.fullmatch(r"[A-Z]{1,6}", code.upper()))
-                    pt = get_price_target(
-                        code, name, market_now, current_price,
-                        api_choice=api_choice,
-                        claude_api_key=claude_api_key,
-                        grok_api_key=grok_api_key,
-                        gemini_api_key=gemini_api_key,
-                    )
-                    st.session_state.price_targets[code] = pt
-                    p_progress.progress(
-                        (pi + 1) / len(strong_up),
-                        text=f"目標株価取得中... ({pi+1}/{len(strong_up)}) {name}",
-                    )
-                p_progress.empty()
-
-            st.success("AIトレンド判定が完了しました。グラフの表示順をランキング順に変更しました。")
-            # 画面全体を再描画し、CSVダウンロードボタン等を即座に有効化する
+            st.session_state.auto_trend_price_queue = []
+            st.session_state.auto_trend_strong_up = []
             st.rerun()
+
 
     # ── トレンドランキング表の表示 ──
     trend_ranking = st.session_state.get("trend_ranking", [])
