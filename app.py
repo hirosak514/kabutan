@@ -1537,14 +1537,15 @@ TF_LABEL = {"day": "日足", "week": "週足", "month": "月足"}
 
 def calc_trend_score(series_day: list, series_week: list, series_month: list):
     """
-    数値データからトレンドスコアを計算する（0〜6点）。
-    日足・週足・月足それぞれ2点満点。
-    戻り値: (total_score, {"day": 0-2, "week": 0-2, "month": 0-2})
+    数値データからトレンドスコアを計算する（0〜7点）。
+    日足・週足・月足それぞれ2点満点（計6点、既存ロジックを完全踏襲）に加え、
+    さらに厳しい追加条件（直近25営業日の新高値更新）を満たした場合のみ7点目を加点する。
+    戻り値: (total_score, {"day": 0-2, "week": 0-2, "month": 0-2, "extra": 0-1})
     """
     score = 0
-    details = {"day": 0, "week": 0, "month": 0}
+    details = {"day": 0, "week": 0, "month": 0, "extra": 0}
 
-    # ── 日足 ──
+    # ── 日足（既存ロジックを完全踏襲） ──
     if len(series_day) >= 25:
         closes = [d["close"] for d in series_day]
         ma5  = sum(closes[-5:]) / 5
@@ -1552,18 +1553,28 @@ def calc_trend_score(series_day: list, series_week: list, series_month: list):
         if closes[-1] > ma25:   score += 1; details["day"] += 1  # 終値 > MA25
         if ma5 > ma25:          score += 1; details["day"] += 1  # MA5 > MA25（GC状態）
 
-    # ── 週足 ──
+    # ── 週足（既存ロジックを完全踏襲） ──
     if len(series_week) >= 4:
         wc = [d["close"] for d in series_week[-4:]]
         rising = sum(1 for i in range(1, len(wc)) if wc[i] >= wc[i - 1])
         if rising >= 2:         score += 1; details["week"] += 1  # 4週中2週以上上昇
         if wc[-1] > wc[0]:     score += 1; details["week"] += 1  # 4週前より高値
 
-    # ── 月足 ──
+    # ── 月足（既存ロジックを完全踏襲） ──
     if len(series_month) >= 3:
         mc = [d["close"] for d in series_month[-3:]]
         if mc[-1] > mc[-2]:    score += 1; details["month"] += 1  # 前月より上昇
         if mc[-1] > mc[0]:     score += 1; details["month"] += 1  # 3ヶ月前より高値
+
+    # ── 追加条件（7点目）：直近25営業日の終値ベース新高値更新 ──
+    # 1〜6点の基準を満たした上で、さらに直近の値動きが特に強い銘柄のみ加点する
+    # （日足・週足・月足すべてで満点=6点を取得していることが前提条件）
+    if score == 6 and len(series_day) >= 25:
+        closes = [d["close"] for d in series_day]
+        recent_25_high = max(closes[-25:-1]) if len(closes) >= 25 else None
+        if recent_25_high is not None and closes[-1] > recent_25_high:
+            score += 1
+            details["extra"] = 1
 
     return score, details
 
@@ -1963,8 +1974,12 @@ with st.sidebar:
 
     score_threshold = st.slider(
         "数値スコア閾値（API節約フィルター）",
-        min_value=1, max_value=6, value=5, step=1,
-        help="6点満点。この点数以上の銘柄のみAI（Vision）判定へ進みます。高いほどAPI費用を節約できます。",
+        min_value=1, max_value=7, value=5, step=1,
+        help=(
+            "7点満点（基本6点＋直近25営業日の新高値更新で+1点）。"
+            "この点数以上の銘柄のみAI（Vision）判定へ進みます。高いほどAPI費用を節約できます。\n"
+            "7点は基本6点を満たした上でさらに直近高値を更新している、特に厳しい基準です。"
+        ),
     )
 
     # チャートルックバック：基準日をN日前にずらして分析する（バックテスト用途）
@@ -3471,10 +3486,11 @@ if st.session_state.get("auto_trend_active"):
                 [
                     {
                         "銘柄": f"{info['company']['name']}（{code}）",
-                        "スコア": f"{info['score']}/6",
+                        "スコア": f"{info['score']}/7",
                         "日足": _score_to_symbol(info["details"]["day"]),
                         "週足": _score_to_symbol(info["details"]["week"]),
                         "月足": _score_to_symbol(info["details"]["month"]),
+                        "新高値": "🌟" if info["details"].get("extra") else "",
                         "判定": "✅ AI判定へ" if code in passed_final else f"❌ 除外（{score_threshold}点未満）",
                     }
                     for code, info in num_scores_final.items()
