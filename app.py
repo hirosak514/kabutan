@@ -378,6 +378,63 @@ if "market" not in st.session_state:
 # ----------------------------------------------------------------------
 # スクレイピング関連
 # ----------------------------------------------------------------------
+def gemini_generate_with_search(model, prompt, contents_extra=None):
+    """
+    Geminiでウェブ検索グラウンディングを使ってcontentを生成する共通ヘルパー。
+    google-generativeai のバージョン差異（GoogleSearch有無、旧APIの
+    google_search_retrieval等）を吸収し、複数の方式を順に試す。
+    すべて失敗した場合は検索なしの通常モードにフォールバックする。
+    戻り値: (response_text, warning_message or None)
+    """
+    import google.generativeai as _genai
+
+    contents = [prompt] if contents_extra is None else contents_extra + [prompt]
+
+    # 方式1: 新しいAPI（google-generativeai >= 0.8.3）
+    try:
+        search_tool = _genai.protos.Tool(
+            google_search=_genai.protos.GoogleSearch()
+        )
+        resp = model.generate_content(contents, tools=[search_tool])
+        return resp.text, None
+    except AttributeError:
+        pass
+    except Exception as e:
+        # AttributeError以外（クォータ超過等）はここで最終的に失敗とみなす
+        return _gemini_fallback_no_search(model, contents, f"{type(e).__name__}: {e}")
+
+    # 方式2: 旧API（google-generativeai < 0.8.0 系）
+    try:
+        search_tool = _genai.protos.Tool(
+            google_search_retrieval=_genai.protos.GoogleSearchRetrieval()
+        )
+        resp = model.generate_content(contents, tools=[search_tool])
+        return resp.text, None
+    except Exception:
+        pass
+
+    # 方式3: 文字列指定によるツール有効化（一部バージョンで対応）
+    try:
+        resp = model.generate_content(contents, tools="google_search_retrieval")
+        return resp.text, None
+    except Exception as e:
+        return _gemini_fallback_no_search(model, contents, f"{type(e).__name__}: {e}")
+
+
+def _gemini_fallback_no_search(model, contents, reason: str):
+    """検索グラウンディングが一切使えない場合、検索なしで生成する最終フォールバック"""
+    try:
+        resp = model.generate_content(contents)
+        return resp.text, (
+            f"Web検索(グラウンディング)が利用できずフォールバックしました（{reason}）。"
+            f"インストール済みのgoogle-generativeaiのバージョンが古い可能性があります。"
+            f"requirements.txtで google-generativeai>=0.8.3 を指定してください。"
+            f"結果は最新情報を反映していない可能性があります。"
+        )
+    except Exception as e2:
+        return "", f"{type(e2).__name__}: {e2}"
+
+
 def detect_market(url: str) -> str:
     """
     URLのドメインから 'jp'（日本株版 kabutan.jp）か
@@ -896,29 +953,18 @@ def analyze_company_with_gemini(model, code: str, name: str) -> dict:
 
     # Google検索グラウンディングを有効にして最新情報を取得する
     # これによりブラウザ版Geminiと同等の最新データが得られる
-    try:
-        search_tool = genai.protos.Tool(
-            google_search=genai.protos.GoogleSearch()
-        )
-        response = model.generate_content(
-            prompt,
-            tools=[search_tool],
-        )
-    except Exception:
-        # グラウンディングが使えない場合（APIプランの制限など）は通常モードで実行
-        try:
-            response = model.generate_content(prompt)
-        except Exception as e:
-            return {
-                "company_overview": f"取得失敗: {e}",
-                "latest_earnings": "-",
-                "valuation": "-",
-                "dividend_yield": "-",
-                "analyst_target": "-",
-            }
+    response_text, _warn = gemini_generate_with_search(model, prompt)
+    if not response_text:
+        return {
+            "company_overview": f"取得失敗: {_warn or '不明なエラー'}",
+            "latest_earnings": "-",
+            "valuation": "-",
+            "dividend_yield": "-",
+            "analyst_target": "-",
+        }
 
     try:
-        text = response.text.strip()
+        text = response_text.strip()
         # ```json ... ``` で囲まれて返ってきた場合の除去
         text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
         # グラウンディング使用時はJSON以外のテキストが混入する場合があるため
@@ -1770,13 +1816,9 @@ def fetch_price_target_minkabu(
         else:  # Gemini
             import google.generativeai as _genai
             _genai.configure(api_key=gemini_api_key)
-            search_tool = _genai.protos.Tool(
-                google_search=_genai.protos.GoogleSearch()
-            )
-            resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
-                prompt, tools=[search_tool]
-            )
-            return _parse(resp.text)
+            model = _genai.GenerativeModel("gemini-2.5-flash")
+            text, _warn = gemini_generate_with_search(model, prompt)
+            return _parse(text) if text else {}
     except Exception:
         return {}
 
@@ -2572,30 +2614,8 @@ Return ONLY this JSON (no explanation, no markdown):
             else:
                 import google.generativeai as _genai
                 _genai.configure(api_key=gemini_api_key)
-                try:
-                    search_tool = _genai.protos.Tool(
-                        google_search=_genai.protos.GoogleSearch()
-                    )
-                    resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
-                        prompt_text, tools=[search_tool]
-                    )
-                    return resp.text, None
-                except Exception as _grounding_err:
-                    # グラウンディング（検索）が使えないAPIプランの場合、
-                    # 通常モード（検索なし）にフォールバックする。
-                    # ただしこの場合、AIは学習データのみに基づいて回答するため
-                    # 最新の決算スケジュール等は反映されない点に注意。
-                    try:
-                        resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
-                            prompt_text
-                        )
-                        return resp.text, (
-                            f"Web検索(グラウンディング)が利用できずフォールバックしました "
-                            f"（{type(_grounding_err).__name__}: {_grounding_err}）。"
-                            f"結果は最新情報を反映していない可能性があります。"
-                        )
-                    except Exception as _fallback_err:
-                        return "", f"{type(_fallback_err).__name__}: {_fallback_err}"
+                model = _genai.GenerativeModel("gemini-2.5-flash")
+                return gemini_generate_with_search(model, prompt_text)
         except Exception as e:
             return "", f"{type(e).__name__}: {e}"
 
