@@ -2536,9 +2536,10 @@ Return ONLY this JSON (no explanation, no markdown):
   {{"code": "7203", "name": "トヨタ自動車", "event": "通期決算発表", "date": "{date_ex}"}}
 ]}}"""
 
-    def _call_ai(prompt_text: str) -> str:
+    def _call_ai(prompt_text: str) -> tuple:
+        """戻り値: (text, error_message or None)"""
         if not prompt_text:
-            return ""
+            return "", None
         try:
             if api_choice == "Claude API（推奨）":
                 client = _anthropic.Anthropic(api_key=claude_api_key)
@@ -2558,7 +2559,7 @@ Return ONLY this JSON (no explanation, no markdown):
                         messages.append({"role": "user", "content": tr})
                     else:
                         break
-                return "".join(b.text for b in resp.content if hasattr(b, "text"))
+                return "".join(b.text for b in resp.content if hasattr(b, "text")), None
             elif api_choice == "Grok API":
                 from openai import OpenAI as _OAI
                 resp = _OAI(api_key=grok_api_key,
@@ -2567,19 +2568,36 @@ Return ONLY this JSON (no explanation, no markdown):
                     input=[{"role": "user", "content": prompt_text}],
                     tools=[{"type": "web_search"}],
                 )
-                return resp.output_text
+                return resp.output_text, None
             else:
                 import google.generativeai as _genai
                 _genai.configure(api_key=gemini_api_key)
-                search_tool = _genai.protos.Tool(
-                    google_search=_genai.protos.GoogleSearch()
-                )
-                resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
-                    prompt_text, tools=[search_tool]
-                )
-                return resp.text
-        except Exception:
-            return ""
+                try:
+                    search_tool = _genai.protos.Tool(
+                        google_search=_genai.protos.GoogleSearch()
+                    )
+                    resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
+                        prompt_text, tools=[search_tool]
+                    )
+                    return resp.text, None
+                except Exception as _grounding_err:
+                    # グラウンディング（検索）が使えないAPIプランの場合、
+                    # 通常モード（検索なし）にフォールバックする。
+                    # ただしこの場合、AIは学習データのみに基づいて回答するため
+                    # 最新の決算スケジュール等は反映されない点に注意。
+                    try:
+                        resp = _genai.GenerativeModel("gemini-2.5-flash").generate_content(
+                            prompt_text
+                        )
+                        return resp.text, (
+                            f"Web検索(グラウンディング)が利用できずフォールバックしました "
+                            f"（{type(_grounding_err).__name__}: {_grounding_err}）。"
+                            f"結果は最新情報を反映していない可能性があります。"
+                        )
+                    except Exception as _fallback_err:
+                        return "", f"{type(_fallback_err).__name__}: {_fallback_err}"
+        except Exception as e:
+            return "", f"{type(e).__name__}: {e}"
 
     def _parse(text: str, market: str, key: str) -> list:
         text = re.sub(r"^```json\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
@@ -2596,11 +2614,19 @@ Return ONLY this JSON (no explanation, no markdown):
             return []
 
     all_events = []
+    _debug_errors = []
     if target in ("us", "both"):
-        all_events.extend(_parse(_call_ai(us_prompt), "us", "us_events"))
+        _us_text, _us_err = _call_ai(us_prompt)
+        if _us_err:
+            _debug_errors.append(f"米国株検索エラー: {_us_err}")
+        all_events.extend(_parse(_us_text, "us", "us_events"))
     if target in ("jp", "both"):
-        all_events.extend(_parse(_call_ai(jp_prompt), "jp", "jp_events"))
-    return all_events
+        _jp_text, _jp_err = _call_ai(jp_prompt)
+        if _jp_err:
+            _debug_errors.append(f"日本株検索エラー: {_jp_err}")
+        all_events.extend(_parse(_jp_text, "jp", "jp_events"))
+
+    return all_events, _debug_errors
 
 
 
@@ -2740,7 +2766,7 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
             with st.spinner(f"② {api_choice} でWeb検索中（決算スケジュールページ・M&A・新製品等）..."):
-                ai_results = get_upcoming_events_ai(
+                ai_results, ai_errors = get_upcoming_events_ai(
                     start_days=news_start_days, end_days=news_end_days,
                     api_choice=api_choice,
                     claude_api_key=claude_api_key,
@@ -2749,6 +2775,9 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                     target=target_code,
                 )
             st.caption(f"AI Web検索: {len(ai_results)}件を取得")
+            if ai_errors:
+                for _err in ai_errors:
+                    st.warning(f"⚠️ {_err}")
 
             merged = merge_news_results(yf_results, ai_results)
 
