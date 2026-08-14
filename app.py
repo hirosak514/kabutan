@@ -2501,16 +2501,35 @@ Return ONLY this JSON (no explanation, no markdown):
   {{"code": "AAPL", "name": "Apple Inc.", "event": "Q3 2026 Earnings Report", "date": "{date_ex}"}}
 ]}}"""
 
-    # 日本株向け日本語プロンプト
+    # 日本株向け日本語プロンプト（株予報の決算スケジュールページを明示的に指定）
     jp_prompt = f"""本日は{today.strftime('%Y年%m月%d日')}です。
 {start_jp}から{end_jp}までの間に、日本株（東証上場企業）で
-以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を
-Web検索して調べ、できるだけ多くリストアップしてください：{past_note_jp}
-- 決算発表・四半期決算・通期決算
+以下のような株価に影響しうる重要なイベント・発表が予定されている銘柄を、
+できるだけ多く漏れなくリストアップしてください。{past_note_jp}
+
+【最優先で参照すべき情報源】
+以下の「株予報」決算スケジュールページを必ず確認してください。
+このページは日単位で決算発表予定銘柄を網羅的に一覧できます：
+- kabuyoho.ifis.co.jp/index.php?id=100 （決算スケジュール トップ）
+- 対象期間の各日付について、「{start_jp.replace('年','/').replace('月','/').replace('日','')}」
+  から「{end_jp.replace('年','/').replace('月','/').replace('日','')}」までの日付を
+  順にたどり、各日の「主な発表予定銘柄」および全件リストを確認してください
+
+【その他の参照先（補完用）】
+- 日本経済新聞 決算発表スケジュール
+- 各証券会社（SBI証券・楽天証券等）の決算スケジュールページ
+- 適時開示情報（TDnet）
+
+【対象とするイベント】
+- 決算発表・四半期決算・通期決算（最優先）
 - 業績予想・ガイダンスの修正・上方修正・下方修正
 - M&A・合併・買収・資本業務提携
 - 新製品・新サービスの発表
 - 重要な規制当局の承認・却下
+
+株予報のページには1日あたり数百件の決算発表が掲載されていることがあります。
+可能な限り多くの銘柄（最低でも数十件程度）を拾ってください。1件のみといった
+極端に少ない結果は情報源を十分確認できていない可能性が高いため避けてください。
 
 出力は必ず以下のJSON形式のみ（前後に説明文不要）：
 {{"jp_events": [
@@ -2618,6 +2637,37 @@ def merge_news_results(yf_results: list, ai_results: list) -> list:
     return list(merged.values())
 
 
+def filter_by_avg_volume(events: list, min_volume: int) -> list:
+    """
+    ニュース検索結果を、直近7日間の平均出来高が min_volume 株以上の
+    銘柄のみに絞り込む。yfinanceで出来高を取得できない銘柄は除外する。
+    """
+    import yfinance as yf
+
+    filtered = []
+    for item in events:
+        code = item.get("code", "")
+        market = item.get("market", "jp")
+        if not code:
+            continue
+        symbol = f"{code}.T" if (market == "jp" and not re.fullmatch(r"[A-Z]{1,6}", code.upper())) else code.upper()
+        try:
+            hist = yf.Ticker(symbol).history(period="10d", interval="1d")
+            if hist.empty or "Volume" not in hist.columns:
+                continue
+            recent7 = hist["Volume"].dropna().tail(7)
+            if recent7.empty:
+                continue
+            avg_vol = float(recent7.mean())
+            if avg_vol >= min_volume:
+                item_copy = dict(item)
+                item_copy["avg_volume_7d"] = avg_vol
+                filtered.append(item_copy)
+        except Exception:
+            continue
+    return filtered
+
+
 # ── ニュース銘柄検索UI ──
 with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を自動ピックアップ）", expanded=False):
     active_key = claude_api_key or grok_api_key or gemini_api_key
@@ -2658,6 +2708,22 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
             f"　〜　**{_e.strftime('%Y/%m/%d')}**（{_dlabel(_e)}）"
         )
 
+        use_volume_filter = st.checkbox(
+            "出来高で絞り込む",
+            value=True,
+            help="直近7営業日の平均出来高が指定値以上の銘柄のみに絞り込みます。",
+            key="news_use_volume_filter",
+        )
+        min_volume_threshold = st.number_input(
+            "直近7日間の平均出来高（株）以上",
+            min_value=0,
+            value=100_000,
+            step=10_000,
+            disabled=not use_volume_filter,
+            help="この値未満の銘柄は結果から除外されます。出来高の少ない閑散銘柄を除きたい場合に使用します。",
+            key="news_min_volume",
+        )
+
         target_map = {
             "日本株・米国株 両方": "both",
             "日本株のみ":          "jp",
@@ -2673,7 +2739,7 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                 )
             st.caption(f"決算カレンダー: {len(yf_results)}件を取得")
 
-            with st.spinner(f"② {api_choice} でWeb検索中（M&A・新製品・ガイダンス等）..."):
+            with st.spinner(f"② {api_choice} でWeb検索中（決算スケジュールページ・M&A・新製品等）..."):
                 ai_results = get_upcoming_events_ai(
                     start_days=news_start_days, end_days=news_end_days,
                     api_choice=api_choice,
@@ -2685,6 +2751,16 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
             st.caption(f"AI Web検索: {len(ai_results)}件を取得")
 
             merged = merge_news_results(yf_results, ai_results)
+
+            if use_volume_filter and merged:
+                before_count = len(merged)
+                with st.spinner(f"③ 出来高でフィルタ中（{min_volume_threshold:,}株以上）..."):
+                    merged = filter_by_avg_volume(merged, min_volume_threshold)
+                st.caption(
+                    f"出来高フィルタ: {before_count}件 → **{len(merged)}件**"
+                    f"（直近7日平均{min_volume_threshold:,}株以上）"
+                )
+
             st.session_state["news_results"] = merged
 
         # 検索結果の表示
@@ -2694,11 +2770,14 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
             st.success(f"合計 **{len(news_results)}件** の重要イベント銘柄を検出しました。")
             news_rows = []
             for item in news_results:
+                vol = item.get("avg_volume_7d")
+                vol_str = f"{vol:,.0f}" if vol is not None else "-"
                 news_rows.append({
                     "追加": True,
                     "コード": item["code"],
                     "銘柄名": item["name"],
                     "市場": "🇯🇵 日本株" if item.get("market") == "jp" else "🇺🇸 米国株",
+                    "7日平均出来高": vol_str,
                     "イベント": " / ".join(item.get("events", [])),
                     "情報源": item.get("source", ""),
                 })
@@ -2709,10 +2788,11 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
                     "コード": st.column_config.TextColumn("コード", disabled=True),
                     "銘柄名": st.column_config.TextColumn("銘柄名", disabled=True),
                     "市場": st.column_config.TextColumn("市場", disabled=True),
+                    "7日平均出来高": st.column_config.TextColumn("7日平均出来高", disabled=True),
                     "イベント": st.column_config.TextColumn("イベント内容", disabled=True, width="large"),
                     "情報源": st.column_config.TextColumn("情報源", disabled=True),
                 },
-                disabled=["コード", "銘柄名", "市場", "イベント", "情報源"],
+                disabled=["コード", "銘柄名", "市場", "7日平均出来高", "イベント", "情報源"],
                 hide_index=True,
                 use_container_width=True,
                 key="news_editor",
