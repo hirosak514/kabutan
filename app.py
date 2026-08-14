@@ -381,44 +381,63 @@ if "market" not in st.session_state:
 def gemini_generate_with_search(model, prompt, contents_extra=None):
     """
     Geminiでウェブ検索グラウンディングを使ってcontentを生成する共通ヘルパー。
-    google-generativeai のバージョン差異（GoogleSearch有無、旧APIの
-    google_search_retrieval等）を吸収し、複数の方式を順に試す。
-    すべて失敗した場合は検索なしの通常モードにフォールバックする。
+
+    重要: 旧パッケージ google-generativeai はサポート終了しており、
+    最新版でも search grounding 用の `google_search` ツールが正しく機能しない
+    （AttributeError、またはサーバー側が旧方式 google_search_retrieval を拒否）。
+    そのため、新しい google-genai パッケージ（`from google import genai`）を
+    最優先で使用する。model引数には init_gemini 等で `_api_key` 属性を
+    付与した旧SDKのGenerativeModelインスタンスを渡す（api_key取得のため）。
+
     戻り値: (response_text, warning_message or None)
     """
-    import google.generativeai as _genai
-
+    api_key = getattr(model, "_api_key", None)
     contents = [prompt] if contents_extra is None else contents_extra + [prompt]
+    _attempt_log = []
 
-    # 方式1: 新しいAPI（google-generativeai >= 0.8.3）
+    # ── 方式1（最優先）: 新パッケージ google-genai ──
+    if api_key:
+        try:
+            from google import genai as _new_genai
+            from google.genai import types as _new_types
+
+            client = _new_genai.Client(api_key=api_key)
+            search_tool = _new_types.Tool(google_search=_new_types.GoogleSearch())
+            config = _new_types.GenerateContentConfig(tools=[search_tool])
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=contents,
+                config=config,
+            )
+            if resp.text:
+                return resp.text, None
+            _attempt_log.append("方式1(google-genai): 空のレスポンス")
+        except Exception as e:
+            _attempt_log.append(f"方式1(google-genai): {type(e).__name__} {e}")
+    else:
+        _attempt_log.append("方式1(google-genai): api_keyが取得できずスキップ")
+
+    # ── 方式2（フォールバック）: 旧パッケージ google-generativeai ──
+    import google.generativeai as _genai
     try:
         search_tool = _genai.protos.Tool(
             google_search=_genai.protos.GoogleSearch()
         )
         resp = model.generate_content(contents, tools=[search_tool])
         return resp.text, None
-    except AttributeError:
-        pass
     except Exception as e:
-        # AttributeError以外（クォータ超過等）はここで最終的に失敗とみなす
-        return _gemini_fallback_no_search(model, contents, f"{type(e).__name__}: {e}")
+        _attempt_log.append(f"方式2(旧SDK google_search): {type(e).__name__} {e}")
 
-    # 方式2: 旧API（google-generativeai < 0.8.0 系）
+    # すべて失敗 → 検索なしにフォールバックしつつ、診断情報を残す
     try:
-        search_tool = _genai.protos.Tool(
-            google_search_retrieval=_genai.protos.GoogleSearchRetrieval()
-        )
-        resp = model.generate_content(contents, tools=[search_tool])
-        return resp.text, None
+        _installed_ver = _genai.__version__
     except Exception:
-        pass
-
-    # 方式3: 文字列指定によるツール有効化（一部バージョンで対応）
-    try:
-        resp = model.generate_content(contents, tools="google_search_retrieval")
-        return resp.text, None
-    except Exception as e:
-        return _gemini_fallback_no_search(model, contents, f"{type(e).__name__}: {e}")
+        _installed_ver = "不明"
+    reason = (
+        f"インストール済み google-generativeai バージョン: {_installed_ver} ／ "
+        + " / ".join(_attempt_log)
+    )
+    return _gemini_fallback_no_search(model, contents, reason)
 
 
 def _gemini_fallback_no_search(model, contents, reason: str):
@@ -426,10 +445,8 @@ def _gemini_fallback_no_search(model, contents, reason: str):
     try:
         resp = model.generate_content(contents)
         return resp.text, (
-            f"Web検索(グラウンディング)が利用できずフォールバックしました（{reason}）。"
-            f"インストール済みのgoogle-generativeaiのバージョンが古い可能性があります。"
-            f"requirements.txtで google-generativeai>=0.8.3 を指定してください。"
-            f"結果は最新情報を反映していない可能性があります。"
+            f"Web検索(グラウンディング)が利用できずフォールバックしました。"
+            f"結果は最新情報を反映していない可能性があります。［診断情報: {reason}］"
         )
     except Exception as e2:
         return "", f"{type(e2).__name__}: {e2}"
@@ -943,7 +960,9 @@ ANALYSIS_PROMPT_TEMPLATE = """\
 
 def init_gemini(api_key: str, model_name: str = "gemini-2.5-flash"):
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel(model_name)
+    model = genai.GenerativeModel(model_name)
+    model._api_key = api_key  # 検索グラウンディング用に新SDK呼び出し時に使う
+    return model
 
 
 def analyze_company_with_gemini(model, code: str, name: str) -> dict:
@@ -1817,6 +1836,7 @@ def fetch_price_target_minkabu(
             import google.generativeai as _genai
             _genai.configure(api_key=gemini_api_key)
             model = _genai.GenerativeModel("gemini-2.5-flash")
+            model._api_key = gemini_api_key
             text, _warn = gemini_generate_with_search(model, prompt)
             return _parse(text) if text else {}
     except Exception:
@@ -2615,6 +2635,7 @@ Return ONLY this JSON (no explanation, no markdown):
                 import google.generativeai as _genai
                 _genai.configure(api_key=gemini_api_key)
                 model = _genai.GenerativeModel("gemini-2.5-flash")
+                model._api_key = gemini_api_key
                 return gemini_generate_with_search(model, prompt_text)
         except Exception as e:
             return "", f"{type(e).__name__}: {e}"
