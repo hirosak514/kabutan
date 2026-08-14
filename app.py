@@ -2638,7 +2638,7 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         with nc2:
             news_range = st.slider(
                 "検索範囲（本日=0、過去はマイナス、未来はプラス）",
-                min_value=-7, max_value=7,
+                min_value=-7, max_value=16,
                 value=(0, 3),
                 step=1, key="news_range",
             )
