@@ -2784,7 +2784,7 @@ with st.expander("📰 ニュース銘柄検索（今後の重要発表銘柄を
         min_volume_threshold = st.number_input(
             "直近7日間の平均出来高（株）以上",
             min_value=0,
-            value=100_000,
+            value=500_000,
             step=10_000,
             disabled=not use_volume_filter,
             help="この値未満の銘柄は結果から除外されます。出来高の少ない閑散銘柄を除きたい場合に使用します。",
