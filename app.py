@@ -2044,6 +2044,31 @@ with st.sidebar:
         ),
     )
 
+    use_divergence_filter = st.checkbox(
+        "適正株価乖離率フィルター",
+        value=True,
+        help=(
+            "「🔍 AIトレンド判定」ボタンを押した時、数値スコア閾値を通過した銘柄について"
+            "アナリスト予想の適正株価との乖離率を確認し、指定値以上のもののみを"
+            "Vision AI判定の対象にします（この確認にはAPI/Web検索を使用します）。\n"
+            "OFFの場合はこれまで通り乖離率チェックなしで判定します。"
+        ),
+        key="use_divergence_filter",
+    )
+    divergence_threshold = st.number_input(
+        "適正株価までの上昇余地（%）以上",
+        min_value=0.0,
+        value=5.0,
+        step=1.0,
+        disabled=not use_divergence_filter,
+        help=(
+            "現在株価からアナリスト予想の適正株価までの上昇余地が、この値（%）以上の"
+            "銘柄のみをVision AI判定対象とします。適正株価はまずyfinanceのアナリスト予想"
+            "平均値を取得し、取得できない場合はAIでみんかぶの予想株価を検索します。"
+        ),
+        key="divergence_threshold",
+    )
+
     # チャートルックバック：基準日をN日前にずらして分析する（バックテスト用途）
     lookback_date = st.date_input(
         "チャートルックバック（基準日）",
@@ -2098,12 +2123,14 @@ with st.sidebar:
     )
     if _auto_running:
         _stage_label = {
-            "chart":  "STEP 1/4 グラフ取得中",
-            "score":  "STEP 2/4 数値スコア計算中",
-            "vision": "STEP 3/4 Vision AI判定中",
-            "price":  "STEP 4/4 目標株価取得中",
-            "done":   "仕上げ処理中",
+            "chart":       "STEP 1/4 グラフ取得中",
+            "score":       "STEP 2/4 数値スコア計算中",
+            "divergence":  "STEP 2.5/4 適正株価の乖離率を確認中",
+            "vision":      "STEP 3/4 Vision AI判定中",
+            "price":       "STEP 4/4 目標株価取得中",
+            "done":        "仕上げ処理中",
             "done_numerical": "仕上げ処理中",
+            "done_numerical_empty": "仕上げ処理中",
         }.get(st.session_state.get("auto_trend_stage"), "処理中")
         st.caption(f"⏳ 処理実行中：{_stage_label}（このまま画面を開いたままお待ちください）")
 
@@ -3159,6 +3186,9 @@ if st.session_state.companies:
                 "auto_trend_price_queue", "auto_trend_price_total",
                 "auto_trend_strong_up", "_numerical_score_rows_cache",
                 "_vision_results_wip",
+                "auto_trend_divergence_queue", "auto_trend_divergence_total",
+                "auto_trend_divergence_results",
+                "use_divergence_filter_active", "divergence_threshold_active",
             ]:
                 st.session_state.pop(_k, None)
             if "company_editor" in st.session_state:
@@ -3408,6 +3438,8 @@ if auto_trend_clicked:
         st.session_state.auto_trend_vision_results = {}
         st.session_state.auto_trend_price_queue = []
         st.session_state.auto_trend_strong_up = []
+        st.session_state.use_divergence_filter_active = use_divergence_filter
+        st.session_state.divergence_threshold_active = divergence_threshold
         st.rerun()
 
 # ── ステートマシン本体：アクティブな間は毎回の実行で少量ずつ処理する ──
@@ -3501,13 +3533,83 @@ if st.session_state.get("auto_trend_active"):
                         vth = max(3, len(sorted_by_num_auto) // 2)
                         vision_targets_auto = [code for code, _ in sorted_by_num_auto[:vth]]
 
-                    st.session_state.auto_trend_vision_queue = vision_targets_auto
-                    st.session_state.auto_trend_vision_total = len(vision_targets_auto)
                     st.toast(
                         f"📈 STEP 2/3 数値判定が完了（{len(vision_targets_auto)}社が通過）",
                         icon="✅"
                     )
-                    if len(vision_targets_auto) > 60:
+
+                    if st.session_state.get("use_divergence_filter_active"):
+                        # 適正株価乖離率フィルターへ進む
+                        st.session_state.auto_trend_divergence_queue = list(vision_targets_auto)
+                        st.session_state.auto_trend_divergence_total = len(vision_targets_auto)
+                        st.session_state.auto_trend_divergence_results = {}
+                        st.session_state.auto_trend_stage = "divergence"
+                    else:
+                        st.session_state.auto_trend_vision_queue = vision_targets_auto
+                        st.session_state.auto_trend_vision_total = len(vision_targets_auto)
+                        if len(vision_targets_auto) > 60:
+                            st.session_state.auto_trend_show_large_warning = True
+                        st.session_state.auto_trend_stage = "vision"
+            st.rerun()
+
+        # ══ STEP 2.5: 適正株価乖離率フィルター（バッチ処理・use_divergence_filter時のみ） ══
+        elif stage == "divergence":
+            queue = st.session_state.auto_trend_divergence_queue
+            dtotal = st.session_state.get("auto_trend_divergence_total", len(queue))
+            done = dtotal - len(queue)
+            st.progress(
+                done / dtotal if dtotal else 1.0,
+                text=f"STEP 2.5/3 適正株価の乖離率を確認中... {done}/{dtotal}"
+            )
+            threshold = st.session_state.get("divergence_threshold_active", 5.0)
+            batch = queue[:_AUTO_BATCH_PRICE]
+            for code in batch:
+                info = st.session_state.auto_trend_num_scores[code]
+                name = info["company"]["name"]
+                ds = st.session_state.daily_series.get(code, [])
+                current_price = ds[-1]["close"] if ds else None
+                pt = get_price_target(
+                    code, name, market_now, current_price,
+                    api_choice=api_choice,
+                    claude_api_key=claude_api_key,
+                    grok_api_key=grok_api_key,
+                    gemini_api_key=gemini_api_key,
+                )
+                st.session_state.price_targets[code] = pt
+                st.session_state.auto_trend_divergence_results[code] = pt
+            st.session_state.auto_trend_divergence_queue = queue[len(batch):]
+            if not st.session_state.auto_trend_divergence_queue:
+                # 乖離率が閾値以上の銘柄のみVision判定対象として確定（スコア順を維持）
+                divergence_results = st.session_state.auto_trend_divergence_results
+                num_scores_auto = st.session_state.auto_trend_num_scores
+                sorted_codes = sorted(
+                    num_scores_auto.items(), key=lambda x: x[1]["score"], reverse=True
+                )
+                vision_targets_filtered = [
+                    code for code, _ in sorted_codes
+                    if code in divergence_results
+                    and divergence_results[code].get("divergence") is not None
+                    and divergence_results[code]["divergence"] >= threshold
+                ]
+
+                st.toast(
+                    f"💰 STEP 2.5/3 乖離率フィルター完了"
+                    f"（{dtotal}社中 {len(vision_targets_filtered)}社が通過、"
+                    f"上昇余地{threshold:.1f}%以上）",
+                    icon="✅"
+                )
+                if not vision_targets_filtered:
+                    st.warning(
+                        f"適正株価乖離率{threshold:.1f}%以上の銘柄が見つかりませんでした。"
+                        "AIトレンド判定はスキップされます。フィルターの閾値やチェックを見直してください。"
+                    )
+                    st.session_state.trend_ranking = []
+                    st.session_state.trend_sort_active = False
+                    st.session_state.auto_trend_stage = "done_numerical_empty"
+                else:
+                    st.session_state.auto_trend_vision_queue = vision_targets_filtered
+                    st.session_state.auto_trend_vision_total = len(vision_targets_filtered)
+                    if len(vision_targets_filtered) > 60:
                         st.session_state.auto_trend_show_large_warning = True
                     st.session_state.auto_trend_stage = "vision"
             st.rerun()
@@ -3659,6 +3761,23 @@ if st.session_state.get("auto_trend_active"):
                 "auto_trend_vision_results", "auto_trend_vision_total",
                 "auto_trend_price_queue", "auto_trend_price_total",
                 "auto_trend_strong_up",
+                "auto_trend_divergence_queue", "auto_trend_divergence_total",
+                "auto_trend_divergence_results",
+            ]:
+                st.session_state.pop(_k, None)
+
+        # ══ 完了（乖離率フィルターで該当銘柄0件だった場合） ══
+        elif stage == "done_numerical_empty":
+            st.session_state.auto_trend_active = False
+            for _k in [
+                "auto_trend_mode", "auto_trend_stage", "auto_trend_companies", "auto_trend_total",
+                "auto_trend_chart_queue", "auto_trend_score_queue",
+                "auto_trend_num_scores", "auto_trend_vision_queue",
+                "auto_trend_vision_results", "auto_trend_vision_total",
+                "auto_trend_price_queue", "auto_trend_price_total",
+                "auto_trend_strong_up",
+                "auto_trend_divergence_queue", "auto_trend_divergence_total",
+                "auto_trend_divergence_results",
             ]:
                 st.session_state.pop(_k, None)
 
@@ -3678,6 +3797,8 @@ if st.session_state.get("auto_trend_active"):
                 "auto_trend_vision_results", "auto_trend_vision_total",
                 "auto_trend_price_queue", "auto_trend_price_total",
                 "auto_trend_strong_up",
+                "auto_trend_divergence_queue", "auto_trend_divergence_total",
+                "auto_trend_divergence_results",
             ]:
                 st.session_state.pop(_k, None)
 
@@ -3890,9 +4011,7 @@ if has_analysis or has_charts:
                     f"数値判定済みの{len(passed_codes)}社をVision AIで評価します"
                     f"（全{len(st.session_state.numerical_scores)}社中、スコア閾値通過分のみ）。"
                 )
-                # ステートマシンをscoreステージ完了済みの状態で開始（=voteはvisionから）
                 st.session_state.auto_trend_active = True
-                st.session_state.auto_trend_stage = "vision"
                 st.session_state.auto_trend_companies = target_companies_for_trend
                 st.session_state.auto_trend_total = len(target_companies_for_trend)
                 st.session_state.auto_trend_num_scores = {
@@ -3900,11 +4019,24 @@ if has_analysis or has_charts:
                     for c in target_companies_for_trend
                     if c["code"] in st.session_state.numerical_scores
                 }
-                st.session_state.auto_trend_vision_queue = [
-                    c["code"] for c in target_companies_for_trend
-                ]
-                st.session_state.auto_trend_vision_total = len(target_companies_for_trend)
                 st.session_state.auto_trend_vision_results = {}
+
+                if use_divergence_filter:
+                    # 適正株価乖離率フィルターへ進む（voteはdivergenceから）
+                    _codes = [c["code"] for c in target_companies_for_trend]
+                    st.session_state.auto_trend_stage = "divergence"
+                    st.session_state.auto_trend_divergence_queue = _codes
+                    st.session_state.auto_trend_divergence_total = len(_codes)
+                    st.session_state.auto_trend_divergence_results = {}
+                    st.session_state.auto_trend_vision_queue = []
+                    st.session_state.auto_trend_vision_total = 0
+                else:
+                    # ステートマシンをscoreステージ完了済みの状態で開始（voteはvisionから）
+                    st.session_state.auto_trend_stage = "vision"
+                    st.session_state.auto_trend_vision_queue = [
+                        c["code"] for c in target_companies_for_trend
+                    ]
+                    st.session_state.auto_trend_vision_total = len(target_companies_for_trend)
             else:
                 # 数値判定未実施 → ステートマシンをscoreステージから開始
                 # （chartは既に取得済みの前提。取得漏れがあればscoreステージ内で個別に補完される）
@@ -3923,6 +4055,8 @@ if has_analysis or has_charts:
 
             st.session_state.auto_trend_price_queue = []
             st.session_state.auto_trend_strong_up = []
+            st.session_state.use_divergence_filter_active = use_divergence_filter
+            st.session_state.divergence_threshold_active = divergence_threshold
             st.rerun()
 
 
