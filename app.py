@@ -3885,48 +3885,105 @@ if has_analysis or has_charts:
             item for item in trend_ranking_now
             if item.get("overall") == "強い上昇"
         ]
-        csv_btn_disabled = not bool(strong_up_list_full)
+        # ボタンの有効化条件：ランキングが1件でもあれば開けるようにする
+        # （「上位N位」モードでは強い上昇でなくても対象になるため）
+        csv_btn_disabled = not bool(trend_ranking_now)
 
         if not csv_btn_disabled:
             with st.popover("📊 トレンド銘柄CSV", use_container_width=True):
-                st.caption(f"「強い上昇」は全{len(strong_up_list_full)}社あります。")
-                save_count = st.number_input(
-                    "上位何位まで保存するか",
-                    min_value=1,
-                    max_value=len(strong_up_list_full),
-                    value=min(10, len(strong_up_list_full)),
-                    step=1,
-                    key="trend_csv_save_count",
-                    help="ランキング上位から指定した件数までをCSVに含めます。",
+                extract_mode = st.radio(
+                    "抽出方法",
+                    options=["「強い上昇」のみ", "上位N位まで（判定に関わらず）"],
+                    index=0,
+                    key="trend_csv_extract_mode",
+                    help=(
+                        "「強い上昇」のみ：総合判定が強い上昇の銘柄だけを対象にします（従来の仕様）。\n"
+                        "上位N位まで：総合判定に関わらず、ランキング上位から指定件数を強制的に対象にします。"
+                    ),
                 )
-
-                strong_up_list = strong_up_list_full[:save_count]
 
                 import io as _io, csv as _csv, datetime as _dt
                 market_now = st.session_state.get("market", "jp")
-                csv_buf = _io.StringIO()
-                writer = _csv.writer(csv_buf)
-                # 1行目: メタ情報（添付CSVと同一フォーマット）
-                writer.writerow([
-                    "# トレンド銘柄（強い上昇）",
-                    f"保存日時:{_dt.datetime.now().strftime('%Y/%m/%d %H:%M')}",
-                    f"市場:{market_now}",
-                ])
-                # 2行目: ヘッダー
-                writer.writerow(["code", "name"])
-                # データ行
-                for item in strong_up_list:
-                    writer.writerow([item["code"], item["name"]])
-                csv_bytes = csv_buf.getvalue().encode("utf-8-sig")
-                csv_filename = f"トレンド銘柄_上位{save_count}_{_dt.date.today().strftime('%Y%m%d')}.csv"
 
-                st.download_button(
-                    label=f"📥 上位{save_count}社をダウンロード",
-                    data=csv_bytes,
-                    file_name=csv_filename,
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+                if extract_mode == "「強い上昇」のみ":
+                    if not strong_up_list_full:
+                        st.info("現在「強い上昇」と判定された銘柄はありません。")
+                    else:
+                        st.caption(f"「強い上昇」は全{len(strong_up_list_full)}社あります。")
+                        save_count = st.number_input(
+                            "上位何位まで保存するか",
+                            min_value=1,
+                            max_value=len(strong_up_list_full),
+                            value=min(10, len(strong_up_list_full)),
+                            step=1,
+                            key="trend_csv_save_count",
+                            help="ランキング上位から指定した件数までをCSVに含めます。",
+                        )
+                        target_list = strong_up_list_full[:save_count]
+
+                        csv_buf = _io.StringIO()
+                        writer = _csv.writer(csv_buf)
+                        writer.writerow([
+                            "# トレンド銘柄（強い上昇）",
+                            f"保存日時:{_dt.datetime.now().strftime('%Y/%m/%d %H:%M')}",
+                            f"市場:{market_now}",
+                        ])
+                        writer.writerow(["code", "name"])
+                        for item in target_list:
+                            writer.writerow([item["code"], item["name"]])
+                        csv_bytes = csv_buf.getvalue().encode("utf-8-sig")
+                        csv_filename = f"トレンド銘柄_上位{save_count}_{_dt.date.today().strftime('%Y%m%d')}.csv"
+
+                        st.download_button(
+                            label=f"📥 上位{save_count}社をダウンロード",
+                            data=csv_bytes,
+                            file_name=csv_filename,
+                            mime="text/csv",
+                            use_container_width=True,
+                            key="trend_csv_dl_strong",
+                        )
+
+                else:  # 上位N位まで（判定に関わらず）
+                    st.caption(
+                        f"ランキング全体は{len(trend_ranking_now)}社あります"
+                        f"（総合判定を問わず、順位のみで抽出します）。"
+                    )
+                    save_count_all = st.number_input(
+                        "上位何位まで保存するか",
+                        min_value=1,
+                        max_value=len(trend_ranking_now),
+                        value=min(10, len(trend_ranking_now)),
+                        step=1,
+                        key="trend_csv_save_count_all",
+                        help="総合判定（強い上昇・上昇・横ばい・下降等）に関わらず、ランキング上位から強制的に指定件数を抽出します。",
+                    )
+                    target_list_all = trend_ranking_now[:save_count_all]
+
+                    csv_buf = _io.StringIO()
+                    writer = _csv.writer(csv_buf)
+                    writer.writerow([
+                        "# トレンド銘柄（上位N位・判定問わず）",
+                        f"保存日時:{_dt.datetime.now().strftime('%Y/%m/%d %H:%M')}",
+                        f"市場:{market_now}",
+                    ])
+                    # 判定内容も分かるよう列を拡張（先頭2列 code, name は既存フォーマットと互換）
+                    writer.writerow(["code", "name", "順位", "総合判定", "確信度"])
+                    for i, item in enumerate(target_list_all, 1):
+                        writer.writerow([
+                            item["code"], item["name"], i,
+                            item.get("overall", ""), item.get("confidence", ""),
+                        ])
+                    csv_bytes_all = csv_buf.getvalue().encode("utf-8-sig")
+                    csv_filename_all = f"トレンド銘柄_上位{save_count_all}位_{_dt.date.today().strftime('%Y%m%d')}.csv"
+
+                    st.download_button(
+                        label=f"📥 上位{save_count_all}位をダウンロード",
+                        data=csv_bytes_all,
+                        file_name=csv_filename_all,
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="trend_csv_dl_all",
+                    )
         else:
             st.button(
                 "📊 トレンド銘柄CSV",
