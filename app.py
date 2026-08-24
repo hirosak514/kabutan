@@ -2058,7 +2058,7 @@ with st.sidebar:
     divergence_threshold = st.number_input(
         "適正株価までの上昇余地（%）以上",
         min_value=0.0,
-        value=5.0,
+        value=10.0,
         step=1.0,
         disabled=not use_divergence_filter,
         help=(
