@@ -1771,19 +1771,82 @@ def fetch_price_target_yfinance(code: str, market: str) -> dict:
 
 
 def fetch_price_target_minkabu(
+    code: str, name: str = "",
+    api_choice: str = "", claude_api_key: str = "",
+    grok_api_key: str = "", gemini_api_key: str = "",
+) -> dict:
+    """
+    みんかぶの「証券アナリストの予想株価」ページを直接スクレイピングして
+    アナリスト目標株価を取得する（AIは使わない）。
+
+    重要: みんかぶには複数の「目標株価」的な指標が存在し、AIのWeb検索に
+    任せると以下のような別の指標と混同されるリスクがあった：
+      - /stock/{code}/research         : AI株価診断・理論株価（別指標）
+      - /stock/{code}                  : みんかぶ独自の目標株価（個人予想混合）
+      - /stock/{code}/analyst_consensus: 証券アナリストの予想株価（コンセンサス）★これが正しい
+    本関数は analyst_consensus ページのみを直接スクレイピングすることで
+    この混同を防ぎ、AIの読み取り誤差も排除する。
+
+    戻り値: {"target_mean": ..., "target_low": None, "target_high": None,
+             "analyst_count": ...}
+    """
+    url = f"https://minkabu.jp/stock/{code}/analyst_consensus"
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        res.raise_for_status()
+        res.encoding = res.apparent_encoding
+        html = res.text
+
+        # ページ本文から「アナリストの平均目標株価はX円で」というパターンを抽出
+        # 例: "アナリストの平均目標株価は6,292円で、株価はあと16.11%上昇すると予想しています。"
+        m = re.search(
+            r"アナリストの平均目標株価は\s*([\d,]+(?:\.\d+)?)\s*円",
+            html,
+        )
+        if not m:
+            return {}
+        target_mean = float(m.group(1).replace(",", ""))
+
+        # アナリスト人数（内訳）も取得できれば付与する
+        # 例: "強気買い4人、買い1人、中立1人"
+        count_total = None
+        count_matches = re.findall(r"([0-9]+)\s*人", html)
+        if count_matches:
+            try:
+                count_total = sum(int(c) for c in count_matches[:5])
+            except Exception:
+                count_total = None
+
+        return {
+            "target_mean": target_mean,
+            "target_low": None,
+            "target_high": None,
+            "analyst_count": count_total,
+        }
+    except Exception:
+        return {}
+
+
+def fetch_price_target_minkabu_ai(
     code: str, name: str,
     api_choice: str,
     claude_api_key: str = "", grok_api_key: str = "", gemini_api_key: str = "",
 ) -> dict:
     """
-    AIのWeb検索でminkabu.jpの予想株価を取得するフォールバック。
+    【フォールバック専用】直接スクレイピングで取得できなかった場合のみ使う、
+    AIのWeb検索によるみんかぶ予想株価の取得。
+    直接スクレイピングより精度が落ちる可能性があるため、あくまで最終手段とする。
     戻り値: {"target_mean": ..., "target_low": ..., "target_high": ...}
     """
     import anthropic as _anth
 
     prompt = (
-        f"minkabu.jp で証券コード {code}（{name}）の"
-        "「みんかぶ予想株価」または「みんかぶAI理論株価」を検索してください。\n"
+        f"minkabu.jp（みんかぶ）で証券コード {code}（{name}）の"
+        f"「証券アナリストの予想株価」を検索してください。"
+        f"対象ページ: https://minkabu.jp/stock/{code}/analyst_consensus\n"
+        "【重要】必ず「証券アナリストの予想株価（アナリストコンセンサス）」の数値を"
+        "使ってください。「AI株価診断」「理論株価」「みんかぶ目標株価」など"
+        "別の指標と混同しないでください。\n"
         "出力は以下のJSONのみで（前後に説明文不要）：\n"
         '{"target_mean": 数値またはnull, '
         '"target_low": 数値またはnull, '
@@ -1851,9 +1914,9 @@ def get_price_target(
     """
     アナリスト目標株価と乖離率をまとめて返す。
 
-    日本株: yfinanceのアナリスト予想（targetMeanPrice）は更新頻度が低く
-            不正確なケースが確認されているため、みんかぶ（AI検索）を優先し、
-            取得できない場合のみyfinanceにフォールバックする。
+    日本株: みんかぶの「証券アナリストの予想株価」ページを直接スクレイピング
+            するのを最優先とする（AI不要・数値の誤読リスクなし）。
+            取得できない場合のみyfinance→AI検索の順でフォールバックする。
     米国株: yfinanceのアナリスト予想は比較的信頼できるため、従来通り
             yfinanceを優先し、取得できない場合のみAI検索で補完する。
 
@@ -1869,21 +1932,19 @@ def get_price_target(
     is_jp = (market == "jp" and not re.fullmatch(r"[A-Z]{1,6}", code.upper()))
 
     if is_jp:
-        # ── 日本株: みんかぶを優先 ──
-        if claude_api_key or grok_api_key or gemini_api_key:
-            mk_data = fetch_price_target_minkabu(
-                code, name, api_choice,
-                claude_api_key, grok_api_key, gemini_api_key,
-            )
-            if mk_data.get("target_mean"):
-                result.update({
-                    "target_mean":  mk_data["target_mean"],
-                    "target_low":   mk_data.get("target_low"),
-                    "target_high":  mk_data.get("target_high"),
-                    "source": "みんかぶ予想",
-                })
+        # ── 日本株 ① みんかぶを直接スクレイピング（AI不要・最優先） ──
+        mk_data = fetch_price_target_minkabu(code, name)
+        if mk_data.get("target_mean"):
+            analyst_n = mk_data.get("analyst_count")
+            label = f"みんかぶ アナリスト予想（{analyst_n}名）" if analyst_n else "みんかぶ アナリスト予想"
+            result.update({
+                "target_mean":  mk_data["target_mean"],
+                "target_low":   mk_data.get("target_low"),
+                "target_high":  mk_data.get("target_high"),
+                "source": label,
+            })
 
-        # みんかぶで取得できなければyfinanceにフォールバック
+        # ── 日本株 ② yfinanceにフォールバック ──
         if not result["target_mean"]:
             yf_data = fetch_price_target_yfinance(code, market)
             if yf_data.get("target_mean"):
@@ -1892,6 +1953,20 @@ def get_price_target(
                     "target_low":   yf_data.get("target_low"),
                     "target_high":  yf_data.get("target_high"),
                     "source": f"アナリスト予想（{yf_data.get('analyst_count','?')}名・フォールバック）",
+                })
+
+        # ── 日本株 ③ 最終手段：AIによるみんかぶ検索 ──
+        if not result["target_mean"] and (claude_api_key or grok_api_key or gemini_api_key):
+            mk_ai_data = fetch_price_target_minkabu_ai(
+                code, name, api_choice,
+                claude_api_key, grok_api_key, gemini_api_key,
+            )
+            if mk_ai_data.get("target_mean"):
+                result.update({
+                    "target_mean":  mk_ai_data["target_mean"],
+                    "target_low":   mk_ai_data.get("target_low"),
+                    "target_high":  mk_ai_data.get("target_high"),
+                    "source": "みんかぶ予想（AI検索・要確認）",
                 })
     else:
         # ── 米国株: 従来通りyfinanceを優先 ──
@@ -1904,18 +1979,18 @@ def get_price_target(
                 "source": f"アナリスト予想（{yf_data.get('analyst_count','?')}名）",
             })
 
-        # 取得できなければみんかぶをAIで検索
+        # 取得できなければAI検索で補完
         if not result["target_mean"] and (claude_api_key or grok_api_key or gemini_api_key):
-            mk_data = fetch_price_target_minkabu(
+            mk_ai_data = fetch_price_target_minkabu_ai(
                 code, name, api_choice,
                 claude_api_key, grok_api_key, gemini_api_key,
             )
-            if mk_data.get("target_mean"):
+            if mk_ai_data.get("target_mean"):
                 result.update({
-                    "target_mean":  mk_data["target_mean"],
-                    "target_low":   mk_data.get("target_low"),
-                    "target_high":  mk_data.get("target_high"),
-                    "source": "みんかぶ予想",
+                    "target_mean":  mk_ai_data["target_mean"],
+                    "target_low":   mk_ai_data.get("target_low"),
+                    "target_high":  mk_ai_data.get("target_high"),
+                    "source": "みんかぶ予想（AI検索・要確認）",
                 })
 
     # 乖離率計算（プラス=割安、マイナス=割高）
