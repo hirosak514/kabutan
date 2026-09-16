@@ -1850,7 +1850,13 @@ def get_price_target(
 ) -> dict:
     """
     アナリスト目標株価と乖離率をまとめて返す。
-    yfinanceで取得できなければAI+みんかぶで補完。
+
+    日本株: yfinanceのアナリスト予想（targetMeanPrice）は更新頻度が低く
+            不正確なケースが確認されているため、みんかぶ（AI検索）を優先し、
+            取得できない場合のみyfinanceにフォールバックする。
+    米国株: yfinanceのアナリスト予想は比較的信頼できるため、従来通り
+            yfinanceを優先し、取得できない場合のみAI検索で補完する。
+
     戻り値: {"current": ..., "target_mean": ..., "target_low": ...,
              "target_high": ..., "divergence": ..., "source": ...}
     """
@@ -1860,31 +1866,59 @@ def get_price_target(
         "divergence": None, "source": "なし",
     }
 
-    # ① yfinanceから試みる
-    yf_data = fetch_price_target_yfinance(code, market)
-    if yf_data.get("target_mean"):
-        result.update({
-            "target_mean":  yf_data["target_mean"],
-            "target_low":   yf_data.get("target_low"),
-            "target_high":  yf_data.get("target_high"),
-            "source": f"アナリスト予想（{yf_data.get('analyst_count','?')}名）",
-        })
+    is_jp = (market == "jp" and not re.fullmatch(r"[A-Z]{1,6}", code.upper()))
 
-    # ② 取得できなければみんかぶをAIで検索
-    if not result["target_mean"] and (claude_api_key or grok_api_key or gemini_api_key):
-        mk_data = fetch_price_target_minkabu(
-            code, name, api_choice,
-            claude_api_key, grok_api_key, gemini_api_key,
-        )
-        if mk_data.get("target_mean"):
+    if is_jp:
+        # ── 日本株: みんかぶを優先 ──
+        if claude_api_key or grok_api_key or gemini_api_key:
+            mk_data = fetch_price_target_minkabu(
+                code, name, api_choice,
+                claude_api_key, grok_api_key, gemini_api_key,
+            )
+            if mk_data.get("target_mean"):
+                result.update({
+                    "target_mean":  mk_data["target_mean"],
+                    "target_low":   mk_data.get("target_low"),
+                    "target_high":  mk_data.get("target_high"),
+                    "source": "みんかぶ予想",
+                })
+
+        # みんかぶで取得できなければyfinanceにフォールバック
+        if not result["target_mean"]:
+            yf_data = fetch_price_target_yfinance(code, market)
+            if yf_data.get("target_mean"):
+                result.update({
+                    "target_mean":  yf_data["target_mean"],
+                    "target_low":   yf_data.get("target_low"),
+                    "target_high":  yf_data.get("target_high"),
+                    "source": f"アナリスト予想（{yf_data.get('analyst_count','?')}名・フォールバック）",
+                })
+    else:
+        # ── 米国株: 従来通りyfinanceを優先 ──
+        yf_data = fetch_price_target_yfinance(code, market)
+        if yf_data.get("target_mean"):
             result.update({
-                "target_mean":  mk_data["target_mean"],
-                "target_low":   mk_data.get("target_low"),
-                "target_high":  mk_data.get("target_high"),
-                "source": "みんかぶ予想",
+                "target_mean":  yf_data["target_mean"],
+                "target_low":   yf_data.get("target_low"),
+                "target_high":  yf_data.get("target_high"),
+                "source": f"アナリスト予想（{yf_data.get('analyst_count','?')}名）",
             })
 
-    # ③ 乖離率計算（プラス=割安、マイナス=割高）
+        # 取得できなければみんかぶをAIで検索
+        if not result["target_mean"] and (claude_api_key or grok_api_key or gemini_api_key):
+            mk_data = fetch_price_target_minkabu(
+                code, name, api_choice,
+                claude_api_key, grok_api_key, gemini_api_key,
+            )
+            if mk_data.get("target_mean"):
+                result.update({
+                    "target_mean":  mk_data["target_mean"],
+                    "target_low":   mk_data.get("target_low"),
+                    "target_high":  mk_data.get("target_high"),
+                    "source": "みんかぶ予想",
+                })
+
+    # 乖離率計算（プラス=割安、マイナス=割高）
     if result["target_mean"] and current_price and current_price > 0:
         div = (result["target_mean"] - current_price) / current_price * 100
         result["divergence"] = div
@@ -2068,6 +2102,23 @@ with st.sidebar:
         ),
         key="divergence_threshold",
     )
+
+    # 「AIトレンド判定」実行時点の設定と現在の設定にズレがある場合、
+    # 画面に表示中のランキングが古い設定のまま生成されたものである可能性があるため警告する。
+    _last_used_filter = st.session_state.get("last_used_divergence_filter")
+    _last_used_threshold = st.session_state.get("last_used_divergence_threshold")
+    if (
+        st.session_state.get("trend_ranking")
+        and st.session_state.get("trend_sort_active")
+        and _last_used_filter is not None
+        and (_last_used_filter != use_divergence_filter
+             or (use_divergence_filter and _last_used_threshold != divergence_threshold))
+    ):
+        st.warning(
+            "⚠️ 適正株価乖離率フィルターの設定が、現在表示中のランキングを生成した時と"
+            "変わっています。表示中の結果には新しい設定が反映されていません。"
+            "「🔍 AIトレンド判定」を再実行してください。"
+        )
 
     # チャートルックバック：基準日をN日前にずらして分析する（バックテスト用途）
     lookback_date = st.date_input(
@@ -3788,6 +3839,14 @@ if st.session_state.get("auto_trend_active"):
                 f"グラフはランキング順に並び替えられています。"
             )
             st.toast(f"🎉 全自動処理が完了しました！（強い上昇: {strong_count}社）", icon="🎉")
+            # このランキングを生成した時点のフィルター設定を記録
+            # （後でチェックボックス/閾値が変更された場合に警告を出すため）
+            st.session_state.last_used_divergence_filter = st.session_state.get(
+                "use_divergence_filter_active", False
+            )
+            st.session_state.last_used_divergence_threshold = st.session_state.get(
+                "divergence_threshold_active", 10.0
+            )
             # ステートマシンをクリア
             st.session_state.auto_trend_active = False
             for _k in [
@@ -4128,9 +4187,33 @@ if has_analysis or has_charts:
 
         # ランキング表
         rank_rows = []
+        _market_now_for_table = st.session_state.get("market", "jp")
         for i, item in enumerate(trend_ranking, 1):
             icon, _ = TREND_LABELS.get(item["overall"], ("⚪", 3))
             d = item["details"]
+            code = item["code"]
+            is_jp_row = (_market_now_for_table == "jp" and
+                         not re.fullmatch(r"[A-Z]{1,6}", code.upper()))
+            unit = "円" if is_jp_row else "$"
+
+            # 乖離率フィルター等で取得済みの価格情報があれば実数値を表示
+            pt = st.session_state.get("price_targets", {}).get(code)
+            if pt and pt.get("current") is not None:
+                cur_str = f"{pt['current']:,.0f}{unit}" if is_jp_row else f"{pt['current']:.2f}{unit}"
+            else:
+                cur_str = "-"
+            if pt and pt.get("target_mean") is not None:
+                tgt_str = f"{pt['target_mean']:,.0f}{unit}" if is_jp_row else f"{pt['target_mean']:.2f}{unit}"
+            else:
+                tgt_str = "-"
+            if pt and pt.get("divergence") is not None:
+                div_val = pt["divergence"]
+                sign = "+" if div_val >= 0 else ""
+                div_str = f"{sign}{div_val:.1f}%"
+            else:
+                div_str = "-"
+            source_str = pt.get("source", "-") if pt else "-"
+
             rank_rows.append({
                 "順位": i,
                 "銘柄": f"{item['name']}（{item['code']}）",
@@ -4139,6 +4222,10 @@ if has_analysis or has_charts:
                 "週足": f"{_score_to_symbol(d['week'])} {item.get('week_trend','')}",
                 "月足": f"{_score_to_symbol(d['month'])} {item.get('month_trend','')}",
                 "確信度": "★" * item["confidence"] + "☆" * (5 - item["confidence"]),
+                "現在株価": cur_str,
+                "適正株価": tgt_str,
+                "乖離率": div_str,
+                "株価情報源": source_str,
                 "AIコメント": item.get("comment", ""),
             })
         st.dataframe(
@@ -4153,6 +4240,16 @@ if has_analysis or has_charts:
                 "週足":     st.column_config.TextColumn("週足", width="small"),
                 "月足":     st.column_config.TextColumn("月足", width="small"),
                 "確信度":   st.column_config.TextColumn("確信度", width="small"),
+                "現在株価": st.column_config.TextColumn("現在株価", width="small"),
+                "適正株価": st.column_config.TextColumn("適正株価", width="small"),
+                "乖離率":   st.column_config.TextColumn(
+                    "乖離率", width="small",
+                    help="(適正株価-現在株価)/現在株価×100。プラス=割安、マイナス=割高",
+                ),
+                "株価情報源": st.column_config.TextColumn(
+                    "株価情報源", width="medium",
+                    help="適正株価の取得元（みんかぶ予想／アナリスト予想／なし）",
+                ),
                 "AIコメント": st.column_config.TextColumn(
                     "AIコメント",
                     width="large",
