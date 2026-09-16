@@ -3697,11 +3697,17 @@ if st.session_state.get("auto_trend_active"):
             st.session_state.auto_trend_vision_queue = queue[len(batch):]
             if not st.session_state.auto_trend_vision_queue:
                 # Vision判定完了 → ランキング統合
+                # 【重要】乖離率フィルター等で除外された銘柄が数値スコアのみの
+                # 仮判定でランキングに紛れ込まないよう、実際にVision AI判定を
+                # 受けた銘柄（auto_trend_vision_results のキー）のみを対象にする。
                 num_scores_auto = st.session_state.auto_trend_num_scores
                 vision_results_auto = st.session_state.auto_trend_vision_results
                 overall_order_auto = {"強い上昇": 5, "上昇": 4, "横ばい": 3, "下降": 2, "強い下降": 1}
                 trend_ranking_auto = []
-                for code, info in num_scores_auto.items():
+                for code in vision_results_auto.keys():
+                    info = num_scores_auto.get(code)
+                    if info is None:
+                        continue
                     vr = vision_results_auto.get(code)
                     overall = vr["overall"] if vr else (
                         "上昇" if info["score"] >= 5 else
