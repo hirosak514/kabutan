@@ -17,6 +17,8 @@
 import re
 import time
 import json
+import os
+import pickle
 from datetime import date as _date, timedelta as _timedelta
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -293,6 +295,81 @@ def fetch_index_from_wikipedia(index_name: str) -> list:
 
     except Exception:
         return SP500_FALLBACK if index_name == "SP500" else NASDAQ100_FALLBACK
+
+
+# ----------------------------------------------------------------------
+# 処理進捗の永続化（ブラウザを閉じても中断地点から再開できるようにする）
+# ----------------------------------------------------------------------
+# Streamlitはブラウザとの接続が切れるとサーバー側の処理も停止してしまうため、
+# 完全にバックグラウンドで動き続けることは保証できない。
+# その代わり、バッチ処理1件ごとに進捗をディスク（JSON）に保存しておき、
+# 次回アプリを開いた際に「続きから再開」できるようにすることで、
+# それまでの作業（API呼び出し結果等）が無駄にならないようにする。
+_PROGRESS_DIR = "/tmp/kabutan_analyzer_progress"
+_PROGRESS_FILE = os.path.join(_PROGRESS_DIR, "auto_trend_progress.pkl")
+
+# 永続化の対象とするセッションキー（ステートマシンの状態一式）
+_AUTO_TREND_PERSIST_KEYS = [
+    "auto_trend_active", "auto_trend_mode", "auto_trend_stage",
+    "auto_trend_companies", "auto_trend_total",
+    "auto_trend_chart_queue", "auto_trend_score_queue",
+    "auto_trend_num_scores", "auto_trend_vision_queue",
+    "auto_trend_vision_results", "auto_trend_vision_total",
+    "auto_trend_price_queue", "auto_trend_price_total",
+    "auto_trend_strong_up",
+    "auto_trend_divergence_queue", "auto_trend_divergence_total",
+    "auto_trend_divergence_results",
+    "use_divergence_filter_active", "divergence_threshold_active",
+    # ステートマシンが読み書きする、分析結果そのもの（消えると再取得が必要になる）
+    "companies", "charts", "daily_series", "price_targets",
+    "trend_ranking", "trend_sort_active",
+    "numerical_scores", "numerical_passed_codes",
+    "market",
+]
+
+
+def save_progress_to_disk():
+    """現在のステートマシンの状態をディスクに保存する（バッチ1件ごとに呼ぶ）"""
+    try:
+        os.makedirs(_PROGRESS_DIR, exist_ok=True)
+        snapshot = {
+            k: st.session_state.get(k)
+            for k in _AUTO_TREND_PERSIST_KEYS
+            if k in st.session_state
+        }
+        snapshot["_saved_at"] = time.time()
+        with open(_PROGRESS_FILE, "wb") as f:
+            pickle.dump(snapshot, f)
+    except Exception:
+        pass  # 保存に失敗しても処理は継続する（ベストエフォート）
+
+
+def load_progress_from_disk():
+    """ディスクに保存された進捗があれば読み込む（無ければNone）"""
+    try:
+        if not os.path.exists(_PROGRESS_FILE):
+            return None
+        with open(_PROGRESS_FILE, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+
+def clear_progress_on_disk():
+    """保存済みの進捗ファイルを削除する（正常完了時・破棄選択時に呼ぶ）"""
+    try:
+        if os.path.exists(_PROGRESS_FILE):
+            os.remove(_PROGRESS_FILE)
+    except Exception:
+        pass
+
+
+def restore_progress_from_snapshot(snapshot: dict):
+    """スナップショットの内容をst.session_stateに復元する"""
+    for k, v in snapshot.items():
+        if k == "_saved_at":
+            continue
+        st.session_state[k] = v
 
 
 HEADERS = {
@@ -2041,6 +2118,48 @@ def format_price_target_str(pt: dict, is_jp: bool) -> str:
 # ----------------------------------------------------------------------
 st.title("📈 株探 銘柄探検 分析アプリ")
 
+# ── 中断された処理の復元 ──
+# ブラウザを閉じる・リロードするなどでセッションが失われた場合に、
+# ディスクに保存された進捗（前回実行中だった処理）があれば復元を提案する。
+# 「_progress_restore_choice_made」は同一セッション内で一度案内したら
+# 再度表示しないためのフラグ。
+if "_progress_restore_choice_made" not in st.session_state:
+    st.session_state._progress_restore_choice_made = False
+
+if (not st.session_state._progress_restore_choice_made
+        and not st.session_state.get("auto_trend_active")):
+    _saved_snapshot = load_progress_from_disk()
+    if _saved_snapshot and _saved_snapshot.get("auto_trend_active"):
+        _saved_at = _saved_snapshot.get("_saved_at")
+        _saved_at_str = (
+            time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(_saved_at))
+            if _saved_at else "不明"
+        )
+        _stage_jp = {
+            "chart": "グラフ取得", "score": "数値スコア計算",
+            "divergence": "適正株価乖離率確認", "vision": "Vision AI判定",
+            "price": "目標株価取得",
+        }.get(_saved_snapshot.get("auto_trend_stage"), "処理中")
+        st.info(
+            f"🔄 中断された処理が見つかりました（最終保存: {_saved_at_str}時点、"
+            f"ステージ: {_stage_jp}）。ブラウザが閉じられるなどして中断された"
+            f"可能性があります。続きから再開しますか？（それまでの取得結果は保持されています）"
+        )
+        _rc1, _rc2 = st.columns(2)
+        with _rc1:
+            if st.button("▶️ 続きから再開する", use_container_width=True, key="_resume_progress_btn"):
+                restore_progress_from_snapshot(_saved_snapshot)
+                st.session_state._progress_restore_choice_made = True
+                st.rerun()
+        with _rc2:
+            if st.button("🗑️ この進捗を破棄する", use_container_width=True, key="_discard_progress_btn"):
+                clear_progress_on_disk()
+                st.session_state._progress_restore_choice_made = True
+                st.rerun()
+        st.stop()  # 選択されるまで以降の画面を表示しない
+    else:
+        st.session_state._progress_restore_choice_made = True
+
 with st.sidebar:
     st.header("設定")
 
@@ -3319,6 +3438,7 @@ if st.session_state.companies:
                 st.session_state.pop(_k, None)
             if "company_editor" in st.session_state:
                 del st.session_state["company_editor"]
+            clear_progress_on_disk()
             st.rerun()
 
     edited = st.data_editor(
@@ -3598,6 +3718,7 @@ if st.session_state.get("auto_trend_active"):
             if not st.session_state.auto_trend_chart_queue:
                 st.toast(f"📊 STEP 1/3 グラフ取得が完了（{total}社）", icon="✅")
                 st.session_state.auto_trend_stage = "score"
+            save_progress_to_disk()
             st.rerun()
 
         # ══ STEP 2: 数値スコア計算（バッチ処理） ══
@@ -3645,6 +3766,7 @@ if st.session_state.get("auto_trend_active"):
                     st.session_state.numerical_scores = num_scores_auto
                     st.session_state.numerical_passed_codes = passed
                     st.session_state.auto_trend_stage = "done_numerical"
+                    save_progress_to_disk()
                     st.rerun()
                 else:
                     # 数値スコアリング完了 → Vision判定対象を決定
@@ -3676,6 +3798,7 @@ if st.session_state.get("auto_trend_active"):
                         if len(vision_targets_auto) > 60:
                             st.session_state.auto_trend_show_large_warning = True
                         st.session_state.auto_trend_stage = "vision"
+            save_progress_to_disk()
             st.rerun()
 
         # ══ STEP 2.5: 適正株価乖離率フィルター（バッチ処理・use_divergence_filter時のみ） ══
@@ -3738,6 +3861,7 @@ if st.session_state.get("auto_trend_active"):
                     if len(vision_targets_filtered) > 60:
                         st.session_state.auto_trend_show_large_warning = True
                     st.session_state.auto_trend_stage = "vision"
+            save_progress_to_disk()
             st.rerun()
 
         # ══ STEP 3: Vision AI判定（バッチ処理） ══
@@ -3816,6 +3940,7 @@ if st.session_state.get("auto_trend_active"):
                 st.session_state.auto_trend_price_total = len(strong_up_auto)
                 st.toast(f"🔍 STEP 3/3 Vision AI判定が完了", icon="✅")
                 st.session_state.auto_trend_stage = "price"
+            save_progress_to_disk()
             st.rerun()
 
         # ══ STEP 4: 強い上昇銘柄の目標株価取得（バッチ処理） ══
@@ -3824,6 +3949,7 @@ if st.session_state.get("auto_trend_active"):
             ptotal = st.session_state.get("auto_trend_price_total", len(queue))
             if ptotal == 0:
                 st.session_state.auto_trend_stage = "done"
+                save_progress_to_disk()
                 st.rerun()
             else:
                 done = ptotal - len(queue)
@@ -3848,6 +3974,7 @@ if st.session_state.get("auto_trend_active"):
                 st.session_state.auto_trend_price_queue = queue[len(batch):]
                 if not st.session_state.auto_trend_price_queue:
                     st.session_state.auto_trend_stage = "done"
+                save_progress_to_disk()
                 st.rerun()
 
         # ══ 完了 ══
@@ -3897,6 +4024,7 @@ if st.session_state.get("auto_trend_active"):
                 "auto_trend_divergence_results",
             ]:
                 st.session_state.pop(_k, None)
+            clear_progress_on_disk()
 
         # ══ 完了（乖離率フィルターで該当銘柄0件だった場合） ══
         elif stage == "done_numerical_empty":
@@ -3912,6 +4040,7 @@ if st.session_state.get("auto_trend_active"):
                 "auto_trend_divergence_results",
             ]:
                 st.session_state.pop(_k, None)
+            clear_progress_on_disk()
 
         elif stage == "done":
             strong_count = len(st.session_state.get("auto_trend_strong_up", []))
@@ -3941,6 +4070,7 @@ if st.session_state.get("auto_trend_active"):
                 "auto_trend_divergence_results",
             ]:
                 st.session_state.pop(_k, None)
+            clear_progress_on_disk()
 
     except Exception as _auto_err:
         st.error(
