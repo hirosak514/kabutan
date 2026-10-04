@@ -4266,9 +4266,11 @@ if has_analysis or has_charts:
         # PDFは「作成」ボタンを押した時にのみ生成する（画面描画のたびに重い処理を
         # 走らせないため）。作成済みのPDFはセッションにキャッシュしておき、
         # 銘柄構成が変わらない限り再利用する。
+        _trend_ranking_for_key = st.session_state.get("trend_ranking") or []
         pdf_cache_key = (
             tuple(c["code"] for c in display_companies),
-            bool(st.session_state.get("trend_ranking")),
+            tuple(item["code"] for item in _trend_ranking_for_key)
+            if st.session_state.get("trend_sort_active") else None,
             len(st.session_state.analysis),
         )
         cached_pdf = st.session_state.get("_pdf_cache")
@@ -4292,8 +4294,24 @@ if has_analysis or has_charts:
                     try:
                         # 価格情報をcompanyデータに添付してPDFへ渡す
                         price_targets = st.session_state.get("price_targets", {})
+
+                        # ブラウザ画面と同じ並び順にする（AIトレンド判定後は
+                        # ランキング順。この時点ではまだ画面側のソート処理
+                        # （このブロックより後に実行される）が反映されていない
+                        # ため、ここで同じ基準で並び替えておく）
+                        pdf_source_companies = display_companies
+                        _trend_ranking_for_pdf = st.session_state.get("trend_ranking") or []
+                        if _trend_ranking_for_pdf and st.session_state.get("trend_sort_active"):
+                            _code_rank_for_pdf = {
+                                item["code"]: i for i, item in enumerate(_trend_ranking_for_pdf)
+                            }
+                            pdf_source_companies = sorted(
+                                display_companies,
+                                key=lambda c: _code_rank_for_pdf.get(c["code"], 999),
+                            )
+
                         companies_with_pt = []
-                        for c in display_companies:
+                        for c in pdf_source_companies:
                             c_copy = dict(c)
                             pt = price_targets.get(c["code"])
                             if pt:
